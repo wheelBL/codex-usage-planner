@@ -1,0 +1,15 @@
+{
+  "name": "codex-usage-planner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test",
+    "demo": "node server.mjs --demo"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "description": "Windows tray monitor and workday-aware usage planner for Codex"
+}

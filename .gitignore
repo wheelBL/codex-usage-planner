@@ -1,0 +1,12 @@
+data/
+node_modules/
+native/bin/
+native/sdk/
+native/webview-sdk.zip
+native/*preview.png
+native/icon-*.png
+native/smoke-result.json
+*.log
+.env*
+auth.json
+%SystemDrive%/
