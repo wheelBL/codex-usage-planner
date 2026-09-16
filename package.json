@@ -11,5 +11,5 @@
   "engines": {
     "node": ">=20"
   },
-  "description": "Windows tray monitor and workday-aware usage planner for Codex"
+  "description": "Windows tray and macOS menu bar monitor with workday-aware usage planning for Codex"
 }

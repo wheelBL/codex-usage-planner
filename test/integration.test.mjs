@@ -36,3 +36,15 @@ test('HTTP protections, exact settings and durable history',async()=>{
    assert.ok((await readFile(path.join(dir,'history.jsonl'),'utf8')).includes('naturalTarget'));
  } finally {child.kill();}
 });
+
+test('native host secret authenticates only its own server', async()=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'codex-planner-native-'));
+ const token='a'.repeat(64), port=46000+Math.floor(Math.random()*1000), origin=`http://127.0.0.1:${port}`;
+ const child=spawn(process.execPath,['server.mjs','--demo'],{cwd:root,env:{...process.env,PORT:String(port),PLANNER_DATA_DIR:dir,PLANNER_SESSION_TOKEN:token},stdio:'ignore'});
+ try {
+   let response;
+   for(let i=0;i<100;i++){try{response=await fetch(origin+'/api/summary',{headers:{'X-Planner-Token':token}});break;}catch{await pause(50);}}
+   assert.equal(response?.status,200);
+   assert.equal((await fetch(origin+'/api/summary',{headers:{'X-Planner-Token':'b'.repeat(64)}})).status,403);
+ } finally { child.kill(); }
+});

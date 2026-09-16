@@ -15,7 +15,10 @@ const demo = process.argv.includes('--demo');
 const port = Number(process.env.PORT || (demo ? 43128 : 43127));
 const dataDir = process.env.PLANNER_DATA_DIR || path.join(root, 'data', demo ? 'demo' : 'live');
 await mkdir(dataDir, { recursive: true });
-const token = randomBytes(24).toString('hex');
+// A native host pins its own per-launch secret before connecting to the local server.
+const hostToken = process.env.PLANNER_SESSION_TOKEN;
+if (hostToken !== undefined && !/^[a-f0-9]{64}$/i.test(hostToken)) throw new Error('Invalid native session token');
+const token = hostToken || randomBytes(24).toString('hex');
 const origin = `http://127.0.0.1:${port}`;
 const configFile = path.join(dataDir, 'settings.json'), historyFile = path.join(dataDir, 'history.jsonl');
 let config = settings(), history = [], latest = null, error = null, active = null;

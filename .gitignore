@@ -10,3 +10,5 @@ native/smoke-result.json
 .env*
 auth.json
 %SystemDrive%/
+dist/
+.build/

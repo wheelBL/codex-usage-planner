@@ -1,6 +1,6 @@
 # Codex Usage Planner · 用量节奏
 
-Windows 托盘中的 Codex 用量监视器：查看实际余量、与计划的偏差、历史曲线，以及考虑重置卡和节假日的每日预算。
+Windows 托盘 / macOS 菜单栏中的 Codex 用量监视器：查看实际余量、与计划的偏差、历史曲线，以及考虑重置卡和节假日的每日预算。
 
 ![每日计划演示](docs/plan-demo.png)
 
@@ -37,6 +37,41 @@ Codex 只显示“还剩多少”时，很难直接判断今天能用多少、�
 - **用卡时段**：北京时间09:30–22:00，计划图直接标注用卡时间。不会自动兑换重置卡。
 - **用量曲线**：实际余量、固定计划基准及短期趋势，支持历史导出；休息日不虚构消耗。
 - **时区处理**：显示时区与工作日日历时区独立，按实际时间处理部分工作日及夏令时。
+
+## macOS 启动
+
+需要 macOS 13+、Xcode Command Line Tools（`xcode-select --install`）、Node.js 20+，以及本机已登录的 Codex ChatGPT 账户。当前实机验证环境为 Apple Silicon / macOS 27；其他版本尚未实机验证。
+
+双击 **Start-macOS.command**，首次会编译 Swift + AppKit + WKWebView 原生外壳。构建会将本机 Node 运行时复制进应用，之后打开应用无需终端 PATH 中有 Node。构建脚本支持 `PLANNER_NODE`，并识别 Homebrew 和 Codex 的本地运行时。
+
+```sh
+./Build-macOS.command
+./Start-macOS.command
+# 示例数据与真实数据隔离
+./Start-macOS.command --demo
+```
+
+成品位于 `dist/Codex Usage Planner.app`，可以移动到“应用程序”目录。它是本机架构的临时签名构建，未公证；不是可直接分发到其他 Mac 的安装包。修改源码后需退出应用并重新构建。
+
+- 菜单栏：双环 + 周剩余百分比；悬停显示计划差额、重置时间，以及服务端提供的主额度 5 小时窗口。
+- 左键打开 / 收起面板；右键提供刷新、固定面板、数据目录和退出。
+- 沿用概览、历史曲线、每日计划、设置和历史 JSON 导出，其他额度池在面板内选择。
+- 原生端每 5 秒检查本机服务摘要，不依赖面板显示状态；服务按原有节奏读取远端。失败、过期和睡眠恢复期间显示灰环与叹号。
+- 同一数据模式只允许一个实例；退出时结束自己启动的服务。默认不设置登录启动，也不发送系统通知；提示显示在菜单栏和面板中。
+- 数据保存在 `~/Library/Application Support/Codex Usage Planner/live/`，演示在 `demo/`，不写入应用包。移除应用即可停止使用，历史数据保留。
+- 原生服务使用随机回环端口与每次启动的新令牌；WKWebView 只允许本机页面和历史导出，不读取浏览器 Cookie。
+
+原生状态测试与 WKWebView 演示自检：
+
+```sh
+mkdir -p .build
+xcrun swiftc macos/UsageState.swift macos/StateTests.swift -o .build/state-tests
+.build/state-tests
+open -n "dist/Codex Usage Planner.app" --env PLANNER_SMOKE_DIR="$PWD/.build" --args --demo --smoke
+# .build/macos-smoke.json 与 .build/macos-smoke.png 是实际内嵌页面的结果
+```
+
+自检前退出已运行的演示实例；`open` 异步启动，自检完成后应用自动退出，再查看结果文件。
 
 ## Windows 启动
 
