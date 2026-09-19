@@ -47,3 +47,31 @@ test('fixed horizon persists after final card redemption',()=>{const t=plan.sche
 import {cardTimeAllowed} from '../planner.mjs';
 test('redemption window is Beijing 09:30 to 22:00 inclusive',()=>{for(const [time,allowed] of [['09:29:59',false],['09:30:00',true],['22:00:00',true],['22:00:01',false]])assert.equal(cardTimeAllowed(instant('2026-09-18T'+time+'+08:00')),allowed);for(const c of plan.schedule)assert.ok(cardTimeAllowed(c.plannedAt));const other=createPlan(w,s,settings({timezone:'America/Los_Angeles',calendarTimezone:'UTC'}),at);for(const c of other.schedule)assert.ok(cardTimeAllowed(c.plannedAt));});
 test('expiry before next allowed redemption reports infeasible',()=>{const t=instant('2026-09-18T22:01:00+08:00');const p=createPlan(w,{...s,at:t,credits:[card('night','2026-09-19T09:00:00+08:00')]},cfg,t);assert.equal(p.infeasible,true);});
+
+test('work sessions exclude night and lunch while preserving one day',()=>{
+ const c=settings({calendar:'weekends',workHours:[[540,720],[780,1080]]});
+ const a=instant('2026-09-15T00:00:00+08:00'), t=h=>a+h*3600000, clock=makeClock(a,a+DAY,c);
+ close(clock.work(a,a+DAY),1);close(clock.work(t(0),t(9)),0);close(clock.work(t(12),t(13)),0);close(clock.work(t(18),t(24)),0);close(clock.work(t(9),t(12)),3/8);
+ close(makeClock(a,a+DAY,settings({...c,dayOverrides:{'2026-09-15':0.5}})).work(a,a+DAY),0.5);
+});
+test('session validation rejects overlaps and overnight ranges',()=>{
+ for(const workHours of [[[720,540]],[[540,780],[720,900]],[[-1,20]],[[0,1441]],[[0,2.5]]])assert.throws(()=>settings({workHours}));
+});
+test('DST scheduled intervals preserve actual active time',()=>{
+ const c=settings({calendar:'weekends',restWeight:1,calendarTimezone:'America/Los_Angeles',workHours:[[60,240]]});
+ for(const [day,next,hours] of [['2026-11-01','2026-11-02',4],['2026-03-08','2026-03-09',2]]){
+  const a=midnight(day,c.calendarTimezone),b=midnight(next,c.calendarTimezone),clock=makeClock(a,b,c);
+  close(clock.work(a,b),1);close(clock.rows[0].activeDuration,hours*3600000);
+ }
+});
+test('scheduled plan conserves quota and freezes overnight',()=>{
+ const c=settings({workHours:[[540,720],[780,1080]]}),p=createPlan(w,{...s,credits:[]},c,at);
+ close(p.daily.reduce((n,d)=>n+d.amount,0),60);
+ close(plannedRemaining(p,instant('2026-09-15T18:00:00+08:00'),c),plannedRemaining(p,instant('2026-09-16T09:00:00+08:00'),c));
+});
+test('forecast exhaustion skips the configured lunch break',()=>{
+ const c=settings({calendar:'weekends',workHours:[[540,705],[840,1050],[1140,1320]]});
+ const end=instant('2026-09-15T11:40:00+08:00');
+ const f=forecast([sample(end-600000,2),sample(end,1)],{...w,remaining:1},'a',end,c);
+ assert.ok(Math.abs(f.exhaustsAt-instant('2026-09-15T14:05:00+08:00'))<1);
+});

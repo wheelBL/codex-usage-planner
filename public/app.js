@@ -18,7 +18,7 @@ function render(next) {
   if (selected) $('window').value = selected;
   if (!initialized) {
     if (![...$('timezone').options].some(o => o.value === state.config.timezone)) $('timezone').add(new Option(state.config.timezone));
-    $('timezone').value = state.config.timezone; $('calendar-timezone').value=state.config.calendarTimezone; $('calendar').value=state.config.calendar; $('rest-weight').value=state.config.restWeight; $('overrides').value=Object.entries(state.config.dayOverrides).map(([d,w])=>d+'='+w).join('\n');
+    $('timezone').value = state.config.timezone; $('calendar-timezone').value=state.config.calendarTimezone; $('calendar').value=state.config.calendar; $('rest-weight').value=state.config.restWeight; $('work-hours').value=(state.config.workHours||[]).map(([a,b])=>[a,b].map(n=>String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0')).join('-')).join('\n'); $('overrides').value=Object.entries(state.config.dayOverrides).map(([d,w])=>d+'='+w).join('\n');
     $('manual').value = state.config.manualCredits.map(c => c.expiresAt).join('\n'); initialized = true;
   }
   $('status').className = state.stale || state.demo || state.persistenceError ? 'warn' : '';
@@ -83,8 +83,8 @@ function draw() {
   line(nat,'#7f8d99');line(plan,'#c5b3ff');line(actual,'#9fe8c8');
   for(const a of plotted){ctx.fillStyle='#9fe8c8';ctx.beginPath();ctx.arc(a.x,a.y,2.5,0,Math.PI*2);ctx.fill();}
   const dates=state.plan?.daily||[];
-  const work=(a,b)=>dates.reduce((sum,d)=>sum+Math.max(0,Math.min(b,d.end)-Math.max(a,d.start))/(d.end-d.start)*d.weight,0);
-  const cuts=(a,b)=>[a,...dates.map(d=>d.end).filter(t=>t>a&&t<b),b];
+  const work=(a,b)=>dates.reduce((sum,d)=>sum+(d.intervals||[[d.start,d.end]]).reduce((n,[x,y])=>n+Math.max(0,Math.min(b,y)-Math.max(a,x)),0)/(d.activeDuration||d.end-d.start)*d.weight,0);
+  const cuts=(a,b)=>[...new Set([a,...dates.flatMap(d=>[d.end,...(d.intervals||[]).flat()]).filter(t=>t>a&&t<b),b])].sort((x,y)=>x-y);
   if(w.naturalTarget!=null){const units=work(now,w.resetsAt);line(cuts(now,w.resetsAt).map(t=>[t,units?w.naturalTarget*work(t,w.resetsAt)/units:0]),'#7f8d99',[4,5]);}
   if(w.bucket==='codex'&&state.plan?.segments?.length)for(const s of state.plan.segments){if(s.end<now)continue;line(cuts(Math.max(now,s.start),s.end).map(t=>[t,Math.max(0,s.amount-s.rate*work(s.start,t))]),'#c5b3ff',[6,5]);}
 
@@ -99,7 +99,8 @@ $('range').addEventListener('change',update);window.addEventListener('resize',dr
 $('refresh').addEventListener('click',async()=>{ $('refresh').disabled=true;try{render(await api('refresh',{}));}catch(e){$('status').textContent=e.message;}finally{$('refresh').disabled=false;} });
 $('settings').addEventListener('submit',async event=>{event.preventDefault();try{
  const dayOverrides={};for(const row of $('overrides').value.split('\n').map(s=>s.trim()).filter(Boolean)){const pair=row.split('=');if(pair.length!==2||!pair[1].trim())throw new Error('每行格式为 YYYY-MM-DD=0 或 YYYY-MM-DD=1');dayOverrides[pair[0].trim()]=Number(pair[1]);}
- render(await api('settings',{timezone:$('timezone').value,calendarTimezone:$('calendar-timezone').value,calendar:$('calendar').value,restWeight:Number($('rest-weight').value),dayOverrides,manualCredits:$('manual').value.split('\n').map(s=>s.trim()).filter(Boolean).map(expiresAt=>({expiresAt}))}));$('saved').textContent='已保存并更新计划';
+ const workHours=$('work-hours').value.split('\n').map(s=>s.trim()).filter(Boolean).map(s=>{if(!/^([01]\d|2[0-3]):[0-5]\d-(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(s))throw new Error('工作时段格式为 09:00-12:00，每行一段');return s.split('-').map(t=>{const [h,m]=t.split(':').map(Number);return h*60+m;});});
+ render(await api('settings',{workHours,timezone:$('timezone').value,calendarTimezone:$('calendar-timezone').value,calendar:$('calendar').value,restWeight:Number($('rest-weight').value),dayOverrides,manualCredits:$('manual').value.split('\n').map(s=>s.trim()).filter(Boolean).map(expiresAt=>({expiresAt}))}));$('saved').textContent='已保存并更新计划';
  }catch(e){$('saved').textContent=e.message;}});
 $('replan').addEventListener('click',async()=>{try{render(await api('replan',{}));}catch(e){$('plan-warning').textContent=e.message;}});
 $('export').addEventListener('click',async()=>{try{const rows=await api('export');const url=URL.createObjectURL(new Blob([JSON.stringify(rows,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='codex-usage-history.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){$('status').textContent=e.message;}});

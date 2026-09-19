@@ -29,7 +29,7 @@ export function createPlan(window,snapshot,config,now=snapshot.at,policy={}){
 
  const initialCandidates=new Set();
  for(let t=Math.ceil(now/3600000)*3600000;t<last;t+=3600000)initialCandidates.add(t);
- for(const row of clock.rows){if(row.start>now&&row.start<last)initialCandidates.add(row.start);if(row.end>now&&row.end<last)initialCandidates.add(row.end-EPS);}
+ for(const row of clock.rows){for(const t of row.intervals.flat())if(t>now&&t<last)initialCandidates.add(t);if(row.start>now&&row.start<last)initialCandidates.add(row.start);if(row.end>now&&row.end<last)initialCandidates.add(row.end-EPS);}
  for(let day=Math.floor((now+8*3600000)/DAY)*DAY-8*3600000;day<last;day+=DAY){initialCandidates.add(day+9.5*3600000);initialCandidates.add(day+22*3600000);}
  for(const c of cards)initialCandidates.add(c.expiresAt-EPS);
  // At identical redemption times and consumed/wasted quota, future states are identical.
@@ -47,7 +47,7 @@ export function createPlan(window,snapshot,config,now=snapshot.at,policy={}){
  return {anchorAt:now,account:snapshot.account,hasExpiringCards:all.length>0,initialRemaining:window.remaining,initialReset:window.resetsAt,horizon,end,segments,daily,
   schedule:segments.filter(s=>s.event==='card').map(s=>({...s.card,plannedAt:s.end,overdue:false})),
   consumed:chosen.quota,retained:segments.at(-1).retained||0,peak:chosen.peak,mean:chosen.mean,variance:chosen.variance,waste:chosen.waste,warnings,
-  calendarTimezone:config.calendarTimezone,search:'小时候选搜索 + 5分钟局部细化；额度按实际毫秒和有效工作日核算',version:4};
+  calendarTimezone:config.calendarTimezone,search:'小时候选搜索 + 5分钟局部细化；额度按实际毫秒和有效工作日核算',version:5};
 }
 export function plannedRemaining(plan,now,config){
  if(!plan?.segments?.length)return null;const s=plan.segments.find(s=>now>=s.start&&now<s.end);if(!s)return now>=plan.end?0:plan.initialRemaining;

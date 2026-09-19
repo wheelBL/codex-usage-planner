@@ -46,9 +46,16 @@ export function settings(input = {}) {
   const dayOverrides = input.dayOverrides ?? {};
   if(typeof dayOverrides!=='object'||Array.isArray(dayOverrides)||Object.keys(dayOverrides).length>366)throw new Error('自定义日期最多366天');
   for(const [date,weight] of Object.entries(dayOverrides))if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(Date.parse(date+'T00:00:00Z'))||new Date(date+'T00:00:00Z').toISOString().slice(0,10)!==date||!finite(weight)||weight<0||weight>2)throw new Error('自定义日期格式为 YYYY-MM-DD，强度为0–2');
+  const workHours = input.workHours ?? [];
+  if (!Array.isArray(workHours) || workHours.length > 8) throw new Error('工作时段最多8段');
+  let previousEnd = 0;
+  for (const slot of workHours) {
+    if (!Array.isArray(slot) || slot.length !== 2 || !slot.every(Number.isInteger) || slot[0] < previousEnd || slot[1] <= slot[0] || slot[1] > 1440) throw new Error('工作时段须按顺序排列、不可重叠或跨午夜');
+    previousEnd = slot[1];
+  }
   const manualCredits = input.manualCredits ?? [];
   if (!Array.isArray(manualCredits) || manualCredits.length > 30) throw new Error('最多输入 30 张重置卡');
-  return { timezone, calendarTimezone, calendar, restWeight, dayOverrides, manualAccount: typeof input.manualAccount === 'string' ? input.manualAccount : null, manualCredits: manualCredits.map(c => ({ expiresAt: new Date(instant(c.expiresAt)).toISOString() })) };
+  return { timezone, calendarTimezone, calendar, restWeight, dayOverrides, workHours, manualAccount: typeof input.manualAccount === 'string' ? input.manualAccount : null, manualCredits: manualCredits.map(c => ({ expiresAt: new Date(instant(c.expiresAt)).toISOString() })) };
 }
 export function creditSchedule(snapshot, config, now) { return availableCards(snapshot,config,now); }
 export function budget(window, snapshot, config, now = Date.now(), plan = null) {
@@ -84,7 +91,7 @@ export function forecast(history, window, account, now = Date.now(), config = nu
   if(units<=0)return null;
   const perDay=(first.remaining-last.remaining)/units;
   let exhaustsAt=null;
-  if(perDay>0){if(clock){let needed=last.remaining/perDay;for(const d of clock.rows){const begin=Math.max(d.start,last.at);if(begin>=d.end||d.weight===0)continue;const available=clock.work(begin,d.end);if(needed<=available){exhaustsAt=begin+needed/d.weight*(d.end-d.start);break;}needed-=available;}}else exhaustsAt=last.at+last.remaining*DAY/perDay;}
+  if(perDay>0){if(clock){let lo=last.at,hi=clock.rows.at(-1).end;if(clock.work(lo,hi)>=last.remaining/perDay){for(let i=0;i<50;i++){const mid=(lo+hi)/2;if(clock.work(last.at,mid)>=last.remaining/perDay)hi=mid;else lo=mid;}exhaustsAt=hi;}}else exhaustsAt=last.at+last.remaining*DAY/perDay;}
   return { perDay, since: first.at, until: last.at,
     exhaustsAt,
     atReset: window.resetsAt > last.at ? clamp(last.remaining - perDay * (clock?clock.work(last.at,window.resetsAt):(window.resetsAt-last.at)/DAY)) : null };

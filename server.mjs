@@ -37,7 +37,7 @@ try {
 } catch (e) { if (e.code !== 'ENOENT') throw e; }
 latest = history.at(-1) || null;
 const planFile=path.join(dataDir,'plan.json');let plan=null,planKey=null;
-try{const saved=JSON.parse(await readFile(planFile,'utf8'));if(saved.plan?.version===4){plan=saved.plan;planKey=saved.key;}}catch{}
+try{const saved=JSON.parse(await readFile(planFile,'utf8'));if(saved.plan?.version===5){plan=saved.plan;planKey=saved.key;}}catch{}
 async function updatePlan(snapshot,force=false){
  const w=snapshot?.windows.find(w=>w.bucket==='codex'&&w.duration===7*DAY);if(!w)return;
  const planningConfig={...config};delete planningConfig.timezone;if(!planningConfig.manualCredits.length)delete planningConfig.manualAccount;
@@ -66,7 +66,7 @@ async function refresh() {
         catch (oauthError) {const first=oauthError.diagnostic||describeFailure(oauthError,'oauth-usage');await recordDiagnostic(first);try{snapshot=await readUsage();await recordDiagnostic({stage:'rpc-fallback',category:'recovered'});}catch(rpcError){const second=rpcError.diagnostic||describeFailure(rpcError,'rpc-fallback');await recordDiagnostic(second);throw new Error('OAuth：'+failureLabel(first)+'；RPC：'+failureLabel(second));}}
       }
       await updatePlan(snapshot);
-      snapshot.planAnchor=plan?.anchorAt??null; snapshot.planVersion=4;
+      snapshot.planAnchor=plan?.anchorAt??null; snapshot.planVersion=5;
       snapshot.windows = snapshot.windows.map(w => {
         const b = budget(w, snapshot, config, snapshot.at, plan);
         return { ...w, target: b.target, naturalTarget: b.naturalTarget, deadline: b.deadline };
@@ -117,7 +117,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/summary') return json(200, state(0));
     if (req.method === 'GET' && url.pathname === '/api/export') return json(200, latest ? history.filter(s => s.account === latest.account) : []);
     if (req.method === 'POST' && url.pathname === '/api/refresh') {
-      if (!latest || Date.now() - latest.at >= 30000) await refresh();
+      if (url.searchParams.get('force') === '1' || !latest || Date.now() - latest.at >= 30000) await refresh();
       schedulePoll();
       return json(200, state(days));
     }

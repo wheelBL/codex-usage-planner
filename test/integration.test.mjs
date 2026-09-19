@@ -27,6 +27,15 @@ test('HTTP protections, exact settings and durable history',async()=>{
    assert.equal((await fetch(origin+'/api/state',{headers:{...headers,Origin:'https://example.com'}})).status,403);
    let state;
    for(let i=0;i<100;i++){state=await (await fetch(origin+'/api/state',{headers})).json();if(state.latest)break;await pause(30);}
+   const beforeRefresh=state.latest.at;
+   const fresh=await (await fetch(origin+'/api/refresh?force=1',{method:'POST',headers})).json();
+   assert.ok(fresh.latest.at>beforeRefresh,'wake refresh bypasses the 30 second cache');
+   const workHours=[[540,705],[840,1050],[1140,1320]];
+   const scheduled=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...state.config,workHours})})).json();
+   assert.deepEqual(scheduled.config.workHours,workHours);
+   assert.deepEqual(JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')).workHours,workHours);
+   // Restore full-day settings before checking the original fixed-baseline assertions.
+   state=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify(state.config)})).json();
    assert.equal(state.windows[0].remaining,80);assert.equal(state.latest.account,'demo');assert.ok(state.plan?.anchorAt);const anchor=state.plan.anchorAt;
    const stored=JSON.parse(await readFile(path.join(dir,'plan.json'),'utf8'));assert.equal(stored.plan.anchorAt,anchor);
    const bad=await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({manualCredits:[{expiresAt:'2026-09-26'}]})});assert.equal(bad.status,400);

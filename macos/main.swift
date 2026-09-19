@@ -15,10 +15,17 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     private var lockFD: Int32 = -1
     private let demo = CommandLine.arguments.contains("--demo")
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "") + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-    private let port = Int.random(in: 44000...55000)
+    private var port = Int.random(in: 44000...55000)
     private var base: URL { URL(string: "http://127.0.0.1:\(port)")! }
     private var dataURL: URL!
     private var lastState: UsageState?
+    private var restartAttempts = 0
+    private var restartTask: DispatchWorkItem?
+    private var generation = 0
+    private var serviceStarted = Date()
+    private var smokeWakeTriggered = false
+    private var refreshPending = false
+    private var awaitingFreshSample = false
     private var smokeFinished = false
     private func trace(_ message: String) {
         guard CommandLine.arguments.contains("--smoke"), let directory = ProcessInfo.processInfo.environment["PLANNER_SMOKE_DIR"] else { return }
@@ -60,6 +67,11 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
     private func startService() throws {
+        generation += 1
+        serviceStarted = Date()
+        busy = false
+        ready = false
+        port = Int.random(in: 44000...55000)
         let resources = Bundle.main.resourceURL!
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var env = ProcessInfo.processInfo.environment
@@ -80,12 +92,38 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         p.environment = env
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
-            guard let self, !self.closing else { return }
-            self.showFailure("本机服务已退出，请从右键菜单退出后重新打开。")
+        p.terminationHandler = { [weak self] process in DispatchQueue.main.async {
+            guard let self, !self.closing, self.service === process else { return }
+            self.generation += 1
+            self.busy = false
+            if Date().timeIntervalSince(self.serviceStarted) >= 300 { self.restartAttempts = 0 }
+            self.scheduleRecovery()
         } }
         service = p
         try p.run()
+    }
+    private func scheduleRecovery() {
+        guard !closing, restartTask == nil else { return }
+        guard restartAttempts < 3 else {
+            showFailure("服务连续启动失败，自动重试已停止；右键选择重新连接。")
+            return
+        }
+        restartAttempts += 1
+        let delay = pow(2.0, Double(restartAttempts))
+        showFailure("服务已退出，\(Int(delay)) 秒后自动重启（\(restartAttempts)/3）")
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, !self.closing else { return }
+            self.restartTask = nil
+            do { try self.startService(); self.poll(refresh: true) }
+            catch { self.scheduleRecovery() }
+        }
+        restartTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+    @objc private func reconnect() {
+        if service?.isRunning == true { refresh(); return }
+        restartTask?.cancel(); restartTask = nil; restartAttempts = 0
+        scheduleRecovery()
     }
     private func buildPanel() {
         window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 760), styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
@@ -105,7 +143,7 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     @objc private func clicked() {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
-            for (title, action) in [("打开用量面板", #selector(showPanel)), (pinned ? "取消固定面板" : "固定面板", #selector(togglePin)), ("立即刷新", #selector(refresh)), ("打开数据目录", #selector(openData)), ("退出", #selector(quit))] {
+            for (title, action) in [("打开用量面板", #selector(showPanel)), (pinned ? "取消固定面板" : "固定面板", #selector(togglePin)), ("立即刷新", #selector(refresh)), ("重新连接服务", #selector(reconnect)), ("打开数据目录", #selector(openData)), ("退出", #selector(quit))] {
                 let entry = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
                 entry.target = self
             }
@@ -126,31 +164,43 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     @objc private func togglePin() { pinned.toggle(); showPanel() }
     @objc private func openData() { NSWorkspace.shared.open(dataURL) }
     @objc private func quit() { NSApp.terminate(nil) }
-    @objc private func woke() { showFailure("刚从睡眠恢复，正在更新…"); poll() }
+    @objc private func woke() { awaitingFreshSample = true; showFailure("刚从睡眠恢复，正在读取最新用量…"); poll(refresh: true) }
     @objc private func refresh() { poll(refresh: true) }
     func windowDidResignKey(_ notification: Notification) { if !pinned, window.attachedSheet == nil { window.orderOut(nil) } }
     func windowShouldClose(_ sender: NSWindow) -> Bool { sender.orderOut(nil); return false }
 
     private func poll(refresh: Bool = false) {
-        guard !busy, service?.isRunning == true else { return }
+        if busy { if refresh { refreshPending = true }; return }
+        guard service?.isRunning == true else { return }
+        let requestGeneration = generation
         busy = true
-        var request = URLRequest(url: base.appendingPathComponent(refresh ? "api/refresh" : "api/summary"))
+        var request = URLRequest(url: base.appendingPathComponent(refresh ? "api/refresh" : "api/summary").appending(queryItems: refresh ? [URLQueryItem(name: "force", value: "1")] : []))
         request.setValue(token, forHTTPHeaderField: "X-Planner-Token")
         if refresh { request.httpMethod = "POST"; request.timeoutInterval = 60 }
         session.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
-                guard let self, !self.closing else { return }
+                guard let self, !self.closing, self.generation == requestGeneration else { return }
                 self.busy = false
+                defer {
+                    if self.refreshPending { self.refreshPending = false; self.poll(refresh: true) }
+                }
                 guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data, let state = try? JSONDecoder().decode(UsageState.self, from: data) else {
+                    if refresh { self.awaitingFreshSample = false }
                     self.showFailure("本机状态服务不可达，正在重试…")
                     self.trace("local request: \(error?.localizedDescription ?? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"); decode: \(data.flatMap { try? JSONDecoder().decode(UsageState.self, from: $0) } == nil ? "failed" : "ok")")
                     return
                 }
+                if self.demo && CommandLine.arguments.contains("--recovery-smoke") && !state.stale {
+                    if self.restartAttempts == 0 { self.service?.terminate(); return }
+                    if !self.smokeWakeTriggered { self.smokeWakeTriggered = true; self.woke(); return }
+                }
                 if !self.ready {
                     self.ready = true
                     self.web.load(URLRequest(url: self.base.appendingPathComponent("/").appending(queryItems: [URLQueryItem(name: "embedded", value: "1")])))
-                    self.showPanel()
+                    if !self.window.isVisible && self.lastState == nil { self.showPanel() }
                 }
+                if self.awaitingFreshSample && !refresh { return }
+                if refresh { self.awaitingFreshSample = false }
                 self.lastState = state
                 self.item.button?.title = state.title
                 self.item.button?.toolTip = state.tooltip
@@ -161,7 +211,8 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     private func showFailure(_ message: String) {
         trace(message)
         item?.button?.title = "Codex !"
-        item?.button?.toolTip = message
+        let updated = lastState?.latest.map { "\n最后成功更新 " + Date(timeIntervalSince1970: $0.at / 1000).formatted(date: .abbreviated, time: .standard) } ?? ""
+        item?.button?.toolTip = message + updated
         item?.button?.image = rings(nil)
     }
     private func rings(_ state: UsageState?) -> NSImage {
@@ -207,7 +258,8 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
                     fputs("WKWebView smoke failed\n", stderr); NSApp.terminate(nil); return
                 }
                 let output = ProcessInfo.processInfo.environment["PLANNER_SMOKE_DIR"] ?? NSTemporaryDirectory()
-                try? result.write(toFile: output + "/macos-smoke.json", atomically: true, encoding: .utf8)
+                let report: [String: Any] = ["page": result, "restarts": self.restartAttempts, "wakeRefresh": self.smokeWakeTriggered, "generation": self.generation]
+                if let data = try? JSONSerialization.data(withJSONObject: report, options: .prettyPrinted) { try? data.write(to: URL(fileURLWithPath: output + "/macos-smoke.json")) }
                 webView.takeSnapshot(with: nil) { image, _ in
                     if let tiff = image?.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
                         try? png.write(to: URL(fileURLWithPath: output + "/macos-smoke.png"))
@@ -228,6 +280,7 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     func applicationWillTerminate(_ notification: Notification) {
         closing = true
         timer?.invalidate()
+        restartTask?.cancel()
         session.invalidateAndCancel()
         if let service, service.isRunning {
             service.terminate()

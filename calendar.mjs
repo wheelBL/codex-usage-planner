@@ -22,9 +22,30 @@ export function dayInfo(date,config) {
  const weekday=new Date(date+'T12:00:00Z').getUTCDay();
  return {weight:weekday===0||weekday===6?config.restWeight:1,reason:weekday===0||weekday===6?'周末':'工作日',verified:config.calendar!=='china'||date.startsWith('2026-')};
 }
+// Resolve scheduled wall-clock minutes against actual instants, including DST gaps/folds.
+function activeIntervals(start,end,zone,hours) {
+ if(!hours?.length)return [[start,end]];
+ const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:zone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+ const slots=[];let begin=null;
+ for(let t=start;t<end;t+=60000){
+  const p=Object.fromEntries(fmt.formatToParts(t).map(x=>[x.type,x.value]));const minute=Number(p.hour)*60+Number(p.minute);
+  const active=hours.some(([a,b])=>minute>=a&&minute<b);
+  if(active&&begin===null)begin=t;
+  if(!active&&begin!==null){slots.push([begin,t]);begin=null;}
+ }
+ if(begin!==null)slots.push([begin,end]);return slots;
+}
+const intervalCache=new Map();
 export function makeClock(from,to,config) {
  const zone=config.calendarTimezone||'Asia/Shanghai', rows=[];let key=dateKey(from,zone),cursor=midnight(key,zone),sum=0;
- while(cursor<to){const nextKey=new Date(Date.parse(key+'T12:00:00Z')+DAY).toISOString().slice(0,10);const end=midnight(nextKey,zone),info=dayInfo(key,config);rows.push({date:key,start:cursor,end,prefix:sum,...info});sum+=info.weight;cursor=end;key=nextKey;}
- function at(t){if(t<=rows[0].start)return 0;if(t>=rows.at(-1).end)return sum;let l=0,r=rows.length-1;while(l<r){const m=Math.ceil((l+r)/2);if(rows[m].start<=t)l=m;else r=m-1;}const row=rows[l];return row.prefix+row.weight*(t-row.start)/(row.end-row.start);}
+ while(cursor<to){
+  const nextKey=new Date(Date.parse(key+'T12:00:00Z')+DAY).toISOString().slice(0,10),end=midnight(nextKey,zone),info=dayInfo(key,config);
+  const cacheKey=JSON.stringify([key,zone,config.workHours||[]]);
+  if(!intervalCache.has(cacheKey)){if(intervalCache.size>2000)intervalCache.clear();intervalCache.set(cacheKey,activeIntervals(cursor,end,zone,config.workHours));}
+  const intervals=intervalCache.get(cacheKey),activeDuration=intervals.reduce((s,[a,b])=>s+b-a,0);
+  const weight=activeDuration?info.weight:0;
+  rows.push({date:key,start:cursor,end,prefix:sum,...info,weight,intervals,activeDuration});sum+=weight;cursor=end;key=nextKey;
+ }
+ function at(t){if(!rows.length||t<=rows[0].start)return 0;if(t>=rows.at(-1).end)return sum;let l=0,r=rows.length-1;while(l<r){const m=Math.ceil((l+r)/2);if(rows[m].start<=t)l=m;else r=m-1;}const row=rows[l];return row.prefix+(row.activeDuration?row.weight*row.intervals.reduce((s,[a,b])=>s+Math.max(0,Math.min(t,b)-a),0)/row.activeDuration:0);}
  return {rows,work:(a,b)=>Math.max(0,at(b)-at(a))};
 }

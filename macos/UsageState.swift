@@ -16,6 +16,8 @@ struct UsageWindow: Decodable {
     }
 }
 struct UsageState: Decodable {
+    struct Sample: Decodable { let at: Double }
+    let latest: Sample?
     let demo: Bool
     let stale: Bool
     let error: String?
@@ -35,6 +37,7 @@ struct UsageState: Decodable {
         if let reset = weekly?.resetsAt {
             text += "\n周重置 " + Date(timeIntervalSince1970: reset / 1000).formatted(date: .abbreviated, time: .shortened)
         }
+        if let at = latest?.at { text += "\n更新于 " + Date(timeIntervalSince1970: at / 1000).formatted(date: .omitted, time: .standard) }
         return text
     }
 }

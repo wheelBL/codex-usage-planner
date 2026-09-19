@@ -9,7 +9,10 @@ if [[ -z "$NODE" ]]; then
 fi
 if [[ ! -x "$NODE" ]]; then echo '需要 Node.js 20+，可通过 PLANNER_NODE 指定路径。'; exit 1; fi
 "$NODE" -e 'if (+process.versions.node.split(".")[0] < 20) process.exit(1)'
-APP="$PWD/dist/Codex Usage Planner.app"
+mkdir -p "$PWD/dist"
+FINAL="$PWD/dist/Codex Usage Planner.app"
+STAGING="$(mktemp -d "$PWD/dist/.build.XXXXXX")"
+APP="$STAGING/Codex Usage Planner.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/server" "$PWD/.build/module-cache"
 xcrun swiftc -O -target "$(uname -m)-apple-macosx13.0" -module-cache-path "$PWD/.build/module-cache" macos/UsageState.swift macos/main.swift -o "$APP/Contents/MacOS/CodexUsagePlanner" -framework AppKit -framework WebKit
 cp ./*.mjs "$APP/Contents/Resources/server/"
@@ -26,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Codex Usage Planner</string>
 <key>CFBundleExecutable</key><string>CodexUsagePlanner</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -35,4 +38,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$APP"
-echo "已构建：$APP"
+# Build and sign fresh inodes: overwriting a running signed Node binary can
+# trigger macOS code-signature cache failures on the next launch.
+if [[ -d "$FINAL" ]]; then mv "$FINAL" "$STAGING/previous.app"; fi
+if ! mv "$APP" "$FINAL"; then
+  if [[ -d "$STAGING/previous.app" ]]; then mv "$STAGING/previous.app" "$FINAL"; fi
+  exit 1
+fi
+rm -rf "$STAGING"
+echo "已构建：$FINAL"
