@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {guardSnapshot} from './snapshot-guard.mjs';
 import {createPollScheduler} from './polling.mjs';
 import {describeFailure,failureLabel} from './diagnostics.mjs';
 import { readFile, writeFile, mkdir, rename, appendFile, stat } from 'node:fs/promises';
@@ -36,9 +37,15 @@ try {
   }
 } catch (e) { if (e.code !== 'ENOENT') throw e; }
 latest = history.at(-1) || null;
+const guardFile=path.join(dataDir,'snapshot-guard.json');
+let guardState={version:1,trusted:latest,pending:{}},validationWarning=null;
+try {const saved=JSON.parse(await readFile(guardFile,'utf8'));if(saved.version===1&&saved.trusted?.account&&Array.isArray(saved.trusted.windows))guardState=saved;}catch{}
+if(guardState.trusted?.at> (latest?.at||0))latest=guardState.trusted;
+if(Object.keys(guardState.pending||{}).length)validationWarning='额度变化仍待核验，保留上次可信读数。';
 const planFile=path.join(dataDir,'plan.json');let plan=null,planKey=null;
 try{const saved=JSON.parse(await readFile(planFile,'utf8'));if(saved.plan?.version===5){plan=saved.plan;planKey=saved.key;}}catch{}
 async function updatePlan(snapshot,force=false){
+ if(plan && plan.account!==snapshot.account){plan=null;planKey=null;}
  const w=snapshot?.windows.find(w=>w.bucket==='codex'&&w.duration===7*DAY);if(!w)return;
  const planningConfig={...config};delete planningConfig.timezone;if(!planningConfig.manualCredits.length)delete planningConfig.manualAccount;
  const key=JSON.stringify([snapshot.account,w.resetsAt,planningConfig,availableCards(snapshot,config,Date.now()).map(c=>[c.id,Math.floor(c.expiresAt/1000)])]);
@@ -65,6 +72,12 @@ async function refresh() {
         try { snapshot = await readOAuthUsage({onDiagnostic:recordDiagnostic}); }
         catch (oauthError) {const first=oauthError.diagnostic||describeFailure(oauthError,'oauth-usage');await recordDiagnostic(first);try{snapshot=await readUsage();await recordDiagnostic({stage:'rpc-fallback',category:'recovered'});}catch(rpcError){const second=rpcError.diagnostic||describeFailure(rpcError,'rpc-fallback');await recordDiagnostic(second);throw new Error('OAuth：'+failureLabel(first)+'；RPC：'+failureLabel(second));}}
       }
+      const checked=guardSnapshot(snapshot,guardState);
+      await writeFile(guardFile+'.tmp',JSON.stringify(checked.state),{mode:0o600});
+      await rename(guardFile+'.tmp',guardFile);
+      guardState=checked.state;validationWarning=checked.warning;
+      if(!checked.accepted){error=null;failures=0;return;}
+      snapshot=checked.snapshot;
       await updatePlan(snapshot);
       snapshot.planAnchor=plan?.anchorAt??null; snapshot.planVersion=5;
       snapshot.windows = snapshot.windows.map(w => {
@@ -91,8 +104,8 @@ function schedulePoll(){poller.schedule();}
 function state(days = 7) {
   const now = Date.now();
   const rows = latest ? history.filter(s => s.account === latest.account) : [];
-  return { demo, now, config, latest, plan: days>0?plan:null, error, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
-    stale: !latest || !!error || now - latest.at > 150000,
+  return { demo, now, config, latest, plan: days>0?plan:null, error, validationWarning, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
+    stale: !latest || !!error || !!validationWarning || now - latest.at > 150000,
     windows: latest?.windows.map(w => ({ ...budget(w, latest, config, now, plan), forecast: forecast(rows, w, latest.account, now, config) })) || [],
     history: days > 0 ? rows.filter(s => s.at >= now - days * DAY) : [] };
 }
@@ -122,7 +135,7 @@ const server = http.createServer(async (req, res) => {
       return json(200, state(days));
     }
     if (req.method === 'POST' && url.pathname === '/api/replan') {
-      if(!latest||error||Date.now()-latest.at>150000)return json(409,{error:'请先获取新鲜用量再重算计划'});
+      if(!latest||error||validationWarning||Date.now()-latest.at>150000)return json(409,{error:'请先获取新鲜用量再重算计划'});
       await updatePlan(latest,true);return json(200,state(days));
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
@@ -131,7 +144,7 @@ const server = http.createServer(async (req, res) => {
       const next = settings({ ...JSON.parse(body), manualAccount: latest?.account });
       await writeFile(configFile + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 });
       await rename(configFile + '.tmp', configFile); config = next;
-      if(latest)await updatePlan(latest);
+      if(latest&&!validationWarning)await updatePlan(latest);
       return json(200, state(days));
     }
     return json(404, { error: 'Not found' });

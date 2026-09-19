@@ -24,7 +24,7 @@ function render(next) {
   $('status').className = state.stale || state.demo || state.persistenceError ? 'warn' : '';
   $('status').textContent = [state.demo ? '演示模式 · 示例数据，与真实历史隔离。' : '本机 Codex 状态',
     state.error ? state.error+(state.refreshing?' · 正在重试':state.nextPollAt?' · 下次检查 '+date(state.nextPollAt,true):'') : (state.stale ? '等待新数据；旧快照不可视为当前额度。' : '已连接 · 自动记录中'),
-    state.latest?.ordinaryUsageAllowed === false ? '服务端当前不允许普通额度使用。' : '', state.latest?.creditsWarning || '', state.config.manualAccount && state.config.manualAccount !== state.latest?.account && state.config.manualCredits.length ? '手动卡片属于其他账户，已停用' : '', state.persistenceError || ''].filter(Boolean).join('  /  ');
+    state.validationWarning || '', state.latest?.ordinaryUsageAllowed === false ? '服务端当前不允许普通额度使用。' : '', state.latest?.creditsWarning || '', state.config.manualAccount && state.config.manualAccount !== state.latest?.account && state.config.manualCredits.length ? '手动卡片属于其他账户，已停用' : '', state.persistenceError || ''].filter(Boolean).join('  /  ');
   $('sample').textContent = state.latest ? `采样于 ${date(state.latest.at)}` : '暂无采样';
   const w = state.windows.find(w => w.key === selected);
   if (!w) { draw(); return; }
@@ -49,7 +49,7 @@ function render(next) {
   const f = w.forecast;
   $('forecast').textContent = !f || state.stale ? '消耗趋势：需要至少 5 分钟的连续有效样本；断采或重置后重新积累。' : `近 ${((f.until-f.since)/3600000).toFixed(2)} 小时平均消耗 ${f.perDay.toFixed(2)} 百分点/有效工作日；预计自然重置时剩余 ${pct(f.atReset)}。${f.exhaustsAt ? '线性耗尽时间 ' + date(f.exhaustsAt) : '样本期间未观测到额度下降'}。此推算不能保证未来用量。`;
   renderPlan();
-  const core=state.windows.find(w=>w.bucket==='codex'&&w.duration===7*86400000);if(window.chrome?.webview)window.chrome.webview.postMessage({remaining:core?.remaining??null,gap:core?.gap??null,plannedPerWorkday:core?.plannedPerWorkday??null,stale:state.stale||core?.remaining==null,error:state.error||(state.stale?'数据已过期':'')});
+  const core=state.windows.find(w=>w.bucket==='codex'&&w.duration===7*86400000);if(window.chrome?.webview)window.chrome.webview.postMessage({remaining:core?.remaining??null,gap:core?.gap??null,plannedPerWorkday:core?.plannedPerWorkday??null,stale:state.stale||core?.remaining==null,error:state.validationWarning||state.error||(state.stale?'数据已过期':'')});
   draw();
 }
 function draw() {

@@ -21,6 +21,7 @@ struct UsageState: Decodable {
     let demo: Bool
     let stale: Bool
     let error: String?
+    let validationWarning: String?
     let windows: [UsageWindow]
     var weekly: UsageWindow? { windows.first { $0.bucket == "codex" && $0.duration == 604800000 } }
     var short: UsageWindow? { windows.first { $0.bucket == "codex" && $0.duration == 18000000 } }
@@ -30,7 +31,7 @@ struct UsageState: Decodable {
         return (demo ? "演示 " : "") + "周 \(Int(weekly!.remaining!))%"
     }
     var tooltip: String {
-        if invalid { return "Codex · " + (error ?? "数据过期或周额度不可用，点击查看详情") }
+        if invalid { return "Codex · " + (validationWarning ?? error ?? "数据过期或周额度不可用，点击查看详情") }
         var text = String(format: "Codex · 周剩余 %.1f%%", weekly!.remaining!)
         if let value = short?.remaining { text += String(format: " · 5小时剩余 %.1f%%", value) }
         if let gap = weekly?.gap { text += String(format: "\n实际 − 计划 %+.1f 点", gap) }
