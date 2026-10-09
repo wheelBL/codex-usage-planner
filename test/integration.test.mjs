@@ -27,13 +27,24 @@ test('HTTP protections, exact settings and durable history',async()=>{
    assert.equal((await fetch(origin+'/api/state',{headers:{...headers,Origin:'https://example.com'}})).status,403);
    let state;
    for(let i=0;i<100;i++){state=await (await fetch(origin+'/api/state',{headers})).json();if(state.latest)break;await pause(30);}
+   assert.equal(state.config.remindersEnabled,false);
+   assert.equal(state.reminder,null);
+   assert.ok(state.advice.kind);
+   assert.equal((await fetch(origin+'/api/speed')).status,403);
+   const speed=await (await fetch(origin+'/api/speed',{headers})).json();assert.deepEqual(speed.sessions,[]);assert.equal(speed.selected,null);
+   assert.equal((await fetch(origin+'/api/reminders',{method:'POST',headers,body:JSON.stringify({action:'dismiss'})})).status,409);
    const beforeRefresh=state.latest.at;
    const fresh=await (await fetch(origin+'/api/refresh?force=1',{method:'POST',headers})).json();
    assert.ok(fresh.latest.at>beforeRefresh,'wake refresh bypasses the 30 second cache');
    const workHours=[[540,705],[840,1050],[1140,1320]];
-   const scheduled=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...state.config,workHours})})).json();
-   assert.deepEqual(scheduled.config.workHours,workHours);
+   const scheduled=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...state.config,workHours,remindersEnabled:true})})).json();
+   assert.deepEqual(scheduled.config.workHours,workHours);assert.equal(scheduled.config.remindersEnabled,true);
    assert.deepEqual(JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')).workHours,workHours);
+   const remote=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...scheduled.config,speedSources:[{target:'user@example.invalid',label:'test SSH',port:2222}]})})).json();
+   assert.equal(remote.config.speedSources[0].target,'user@example.invalid');assert.equal(JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')).speedSources[0].port,2222);
+   assert.equal(remote.plan.anchorAt,scheduled.plan.anchorAt,'SSH settings do not rebase the usage plan');
+   assert.deepEqual((await (await fetch(origin+'/api/speed',{headers})).json()).sessions,[],'demo never connects to SSH sources');
+   assert.equal((await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...remote.config,speedSources:[{target:'-oProxyCommand=evil'}]})})).status,400);
    // Restore full-day settings before checking the original fixed-baseline assertions.
    state=await (await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify(state.config)})).json();
    assert.equal(state.windows[0].remaining,80);assert.equal(state.latest.account,'demo');assert.ok(state.plan?.anchorAt);const anchor=state.plan.anchorAt;

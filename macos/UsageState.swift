@@ -1,5 +1,41 @@
 import Foundation
 
+struct SpeedSnapshot: Decodable {
+    struct Session: Decodable {
+        struct Source: Decodable { let label: String; let kind: String; let connected: Bool; let checkedAt: Double? }
+        struct Response: Decodable { let tps: Double; let at: Double }
+        let session: String
+        let model: String?
+        let status: String
+        let last: Response?
+        let source: Source?
+    }
+    let checkedAt: Double?
+    let selected: Session?
+
+    func label(now: Double, connected: Bool = true) -> String {
+        if let source = selected?.source {
+            guard source.connected, let at = source.checkedAt, now - at <= 10000, at <= now + 5000 else { return "— TPS" }
+        }
+        guard connected, selected?.source?.connected != false, let checkedAt, now - checkedAt <= 10000, checkedAt <= now + 5000,
+              let sample = selected?.last, sample.tps.isFinite, sample.tps > 0,
+              sample.at.isFinite, sample.at <= now + 5000 else { return "— TPS" }
+        let value = String(format: "%.1f TPS", sample.tps) + (selected?.source?.kind == "ssh" ? "·SSH" : "")
+        if now - sample.at > 300000 { return value + "·旧" }
+        if selected?.status == "idle" { return value + "·闲" }
+        if selected?.status == "unmeasurable" { return value + "·上次" }
+        return value
+    }
+
+    func tooltip(now: Double, connected: Bool = true) -> String {
+        guard label(now: now, connected: connected) != "— TPS", let selected, let last = selected.last else {
+            return "最近会话 TPS 暂不可用；等待本机或 SSH 日志读数"
+        }
+        let time = Date(timeIntervalSince1970: last.at / 1000).formatted(date: .abbreviated, time: .standard)
+        return "\(selected.source?.label ?? "本机") · 会话 \(selected.session.prefix(8)) · \(selected.model ?? "未知模型")\n最近响应 \(time) · \(label(now: now, connected: connected))\n包含首 token 等待，不是逐 token 解码速度；点击查看详情"
+    }
+}
+
 struct UsageWindow: Decodable {
     let key: String
     let bucket: String
@@ -17,6 +53,8 @@ struct UsageWindow: Decodable {
 }
 struct UsageState: Decodable {
     struct Sample: Decodable { let at: Double }
+    struct Reminder: Decodable { let id: String; let title: String; let body: String }
+    let reminder: Reminder?
     let latest: Sample?
     let demo: Bool
     let stale: Bool

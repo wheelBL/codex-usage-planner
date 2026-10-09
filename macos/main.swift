@@ -1,13 +1,22 @@
 import AppKit
 import WebKit
+import UserNotifications
 import Darwin
 
-final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, NSWindowDelegate {
+final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
+    private var notificationRequested = false
+    private var notificationPending: String?
+    private var notified = Set<String>()
     private var item: NSStatusItem!
     private var window: NSPanel!
     private var web: WKWebView!
     private var service: Process?
     private var timer: Timer?
+    private var speedTimer: Timer?
+    private var speedBusy = false
+    private var lastSpeed: SpeedSnapshot?
+    private var speedConnected = false
+    private var failureMessage: String?
     private var busy = false
     private var ready = false
     private var closing = false
@@ -52,14 +61,18 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
             item.button?.target = self
             item.button?.action = #selector(clicked)
             item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            item.button?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
             showFailure("正在启动本机服务…")
             buildPanel()
             trace("panel built")
             try startService()
             trace("service started")
             timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.poll() }
+            speedTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.pollSpeed() }
+            RunLoop.main.add(speedTimer!, forMode: .common)
             NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
             poll()
+            pollSpeed()
         } catch { fatalStartup(error.localizedDescription) }
     }
 
@@ -70,6 +83,9 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         generation += 1
         serviceStarted = Date()
         busy = false
+        speedBusy = false
+        speedConnected = false
+        lastSpeed = nil
         ready = false
         port = Int.random(in: 44000...55000)
         let resources = Bundle.main.resourceURL!
@@ -201,19 +217,83 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
                 }
                 if self.awaitingFreshSample && !refresh { return }
                 if refresh { self.awaitingFreshSample = false }
+                if let reminder = state.reminder { self.deliver(reminder) } else { self.notified.removeAll() }
                 self.lastState = state
-                self.item.button?.title = state.title
-                self.item.button?.toolTip = state.tooltip
-                self.item.button?.image = self.rings(state)
+                self.failureMessage = nil
+                self.updateStatusItem()
             }
         }.resume()
     }
+    // This reads only cached local-log metadata. Quota polling stays independent.
+    private func pollSpeed() {
+        guard !speedBusy, service?.isRunning == true else { return }
+        speedBusy = true
+        let requestGeneration = generation
+        var request = URLRequest(url: base.appendingPathComponent("api/speed"))
+        request.setValue(token, forHTTPHeaderField: "X-Planner-Token")
+        session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, !self.closing, self.generation == requestGeneration else { return }
+                self.speedBusy = false
+                if error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                   let speed = try? JSONDecoder().decode(SpeedSnapshot.self, from: data) {
+                    self.lastSpeed = speed
+                    self.speedConnected = true
+                } else { self.speedConnected = false }
+                self.updateStatusItem()
+            }
+        }.resume()
+    }
+
+    private func updateStatusItem() {
+        guard let button = item?.button else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let quota = failureMessage == nil ? (lastState?.title ?? "Codex") : "Codex !"
+        let speed = lastSpeed?.label(now: now, connected: speedConnected) ?? "— TPS"
+        button.title = quota + " · " + speed
+        button.image = rings(failureMessage == nil ? lastState : nil)
+        let updated = lastState?.latest.map { "\n最后成功更新 " + Date(timeIntervalSince1970: $0.at / 1000).formatted(date: .abbreviated, time: .standard) } ?? ""
+        let quotaDetail = failureMessage.map { $0 + updated } ?? lastState?.tooltip ?? "等待额度"
+        button.toolTip = quotaDetail + "\n\n" + (lastSpeed?.tooltip(now: now, connected: speedConnected) ?? "等待本机或 SSH 最近会话 TPS")
+        button.setAccessibilityLabel("Codex，" + button.title + "，打开用量面板")
+    }
+    private func deliver(_ reminder: UsageState.Reminder) {
+        guard !notified.contains(reminder.id), notificationPending == nil else { return }
+        notificationPending = reminder.id
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.getNotificationSettings { settings in
+            if settings.authorizationStatus == .notDetermined && !self.notificationRequested {
+                self.notificationRequested = true
+                center.requestAuthorization(options: [.alert, .sound]) { _, _ in DispatchQueue.main.async { self.notificationPending = nil } }
+                return
+            }
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+                DispatchQueue.main.async { self.notificationPending = nil }; return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = reminder.title; content.body = reminder.body
+            center.add(UNNotificationRequest(identifier: reminder.id, content: content, trigger: nil)) { error in
+                DispatchQueue.main.async {
+                    self.notificationPending = nil
+                    guard error == nil else { return }
+                    self.notified.insert(reminder.id)
+                    var request = URLRequest(url: self.base.appendingPathComponent("api/reminders"))
+                    request.httpMethod = "POST"
+                    request.setValue(self.token, forHTTPHeaderField: "X-Planner-Token")
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpBody = try? JSONSerialization.data(withJSONObject: ["id": reminder.id, "action": "delivered"])
+                    self.session.dataTask(with: request).resume()
+                }
+            }
+        }
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) { completionHandler([.banner]) }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) { DispatchQueue.main.async { self.showPanel() }; completionHandler() }
     private func showFailure(_ message: String) {
         trace(message)
-        item?.button?.title = "Codex !"
-        let updated = lastState?.latest.map { "\n最后成功更新 " + Date(timeIntervalSince1970: $0.at / 1000).formatted(date: .abbreviated, time: .standard) } ?? ""
-        item?.button?.toolTip = message + updated
-        item?.button?.image = rings(nil)
+        failureMessage = message
+        updateStatusItem()
     }
     private func rings(_ state: UsageState?) -> NSImage {
         let stale = state?.invalid ?? true
@@ -280,6 +360,7 @@ final class PlannerApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     func applicationWillTerminate(_ notification: Notification) {
         closing = true
         timer?.invalidate()
+        speedTimer?.invalidate()
         restartTask?.cancel()
         session.invalidateAndCancel()
         if let service, service.isRunning {

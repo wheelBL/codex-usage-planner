@@ -1,5 +1,6 @@
 import { makeClock } from './calendar.mjs';
 import { availableCards } from './planner.mjs';
+import { speedSources } from './speed-sources.mjs';
 export const DAY = 86400000;
 export const clamp = n => Math.max(0, Math.min(100, n));
 const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -55,7 +56,7 @@ export function settings(input = {}) {
   }
   const manualCredits = input.manualCredits ?? [];
   if (!Array.isArray(manualCredits) || manualCredits.length > 30) throw new Error('最多输入 30 张重置卡');
-  return { timezone, calendarTimezone, calendar, restWeight, dayOverrides, workHours, manualAccount: typeof input.manualAccount === 'string' ? input.manualAccount : null, manualCredits: manualCredits.map(c => ({ expiresAt: new Date(instant(c.expiresAt)).toISOString() })) };
+  return { timezone, calendarTimezone, calendar, restWeight, dayOverrides, workHours, speedSources:speedSources(input.speedSources), remindersEnabled: input.remindersEnabled === true, manualAccount: typeof input.manualAccount === 'string' ? input.manualAccount : null, manualCredits: manualCredits.map(c => ({ expiresAt: new Date(instant(c.expiresAt)).toISOString() })) };
 }
 export function creditSchedule(snapshot, config, now) { return availableCards(snapshot,config,now); }
 export function budget(window, snapshot, config, now = Date.now(), plan = null) {

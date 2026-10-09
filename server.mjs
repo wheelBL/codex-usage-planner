@@ -1,3 +1,5 @@
+import {advise,reminder} from './advice.mjs';
+import {SpeedReader} from './ssh-speed.mjs';
 import http from 'node:http';
 import {guardSnapshot} from './snapshot-guard.mjs';
 import {createPollScheduler} from './polling.mjs';
@@ -21,11 +23,17 @@ const hostToken = process.env.PLANNER_SESSION_TOKEN;
 if (hostToken !== undefined && !/^[a-f0-9]{64}$/i.test(hostToken)) throw new Error('Invalid native session token');
 const token = hostToken || randomBytes(24).toString('hex');
 const origin = `http://127.0.0.1:${port}`;
+const reminderFile=path.join(dataDir,'reminders.json');
+let reminderPreferences={enabled:false};
+try{reminderPreferences=JSON.parse(await readFile(reminderFile,'utf8'));}catch{}
+async function saveReminders(){await writeFile(reminderFile+'.tmp',JSON.stringify(reminderPreferences),{mode:0o600});await rename(reminderFile+'.tmp',reminderFile);}
 const configFile = path.join(dataDir, 'settings.json'), historyFile = path.join(dataDir, 'history.jsonl');
 let config = settings(), history = [], latest = null, error = null, active = null;
 let persistenceError = null;
 try { config = settings(JSON.parse(await readFile(configFile, 'utf8'))); }
 catch (e) { if (e.code !== 'ENOENT') throw new Error('settings.json 损坏，请修复或备份后移走该文件。'); }
+const speedReader = new SpeedReader();
+if(!demo){speedReader.configure(config.speedSources);speedReader.update().catch(()=>{});setInterval(()=>speedReader.update().catch(()=>{}),1000).unref();}
 try {
   const lines = (await readFile(historyFile, 'utf8')).split('\n').filter(Boolean);
   for (const [i, line] of lines.entries()) {
@@ -47,8 +55,8 @@ try{const saved=JSON.parse(await readFile(planFile,'utf8'));if(saved.plan?.versi
 async function updatePlan(snapshot,force=false){
  if(plan && plan.account!==snapshot.account){plan=null;planKey=null;}
  const w=snapshot?.windows.find(w=>w.bucket==='codex'&&w.duration===7*DAY);if(!w)return;
- const planningConfig={...config};delete planningConfig.timezone;if(!planningConfig.manualCredits.length)delete planningConfig.manualAccount;
- const key=JSON.stringify([snapshot.account,w.resetsAt,planningConfig,availableCards(snapshot,config,Date.now()).map(c=>[c.id,Math.floor(c.expiresAt/1000)])]);
+ const planningConfig={...config};delete planningConfig.timezone;delete planningConfig.remindersEnabled;delete planningConfig.speedSources;if(!planningConfig.manualCredits.length)delete planningConfig.manualAccount;
+ const key=JSON.stringify(['work-window-v2',snapshot.account,w.resetsAt,planningConfig,availableCards(snapshot,config,Date.now()).map(c=>[c.id,Math.floor(c.expiresAt/1000)])]);
  if(!force&&key===planKey&&plan)return;
  const horizon=plan?.account===snapshot.account&&plan.horizon>Date.now()?plan.horizon:undefined;
  plan=createPlan(w,snapshot,config,Date.now(),{horizon});planKey=key;
@@ -104,12 +112,16 @@ function schedulePoll(){poller.schedule();}
 function state(days = 7) {
   const now = Date.now();
   const rows = latest ? history.filter(s => s.account === latest.account) : [];
-  return { demo, now, config, latest, plan: days>0?plan:null, error, validationWarning, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
+  const result = { demo, now, config, latest, plan: days>0?plan:null, error, validationWarning, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
     stale: !latest || !!error || !!validationWarning || now - latest.at > 150000,
     windows: latest?.windows.map(w => ({ ...budget(w, latest, config, now, plan), forecast: forecast(rows, w, latest.account, now, config) })) || [],
     history: days > 0 ? rows.filter(s => s.at >= now - days * DAY) : [] };
+  result.advice=advise(result);
+  result.reminder=reminder(result.advice,{...reminderPreferences,enabled:config.remindersEnabled},now);
+  result.speed=demo?{coverage:'演示模式不读取真实日志',sessions:[],selected:null}:speedReader.snapshot();
+  return result;
 }
-const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+const files = { '/': ['index.html', 'text/html'], '/view-model.js': ['view-model.js', 'text/javascript'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -127,8 +139,19 @@ const server = http.createServer(async (req, res) => {
     if (req.headers['x-planner-token'] !== token) return json(403, { error: '请重新打开本机页面' });
     const days = [1,7,30,90].includes(Number(url.searchParams.get('days'))) ? Number(url.searchParams.get('days')) : 7;
     if (req.method === 'GET' && url.pathname === '/api/state') return json(200, state(days));
+    if (req.method === 'GET' && url.pathname === '/api/speed') return json(200,demo?{coverage:'演示模式不读取真实日志',sessions:[],selected:null}:speedReader.snapshot(url.searchParams.get('session')));
     if (req.method === 'GET' && url.pathname === '/api/summary') return json(200, state(0));
     if (req.method === 'GET' && url.pathname === '/api/export') return json(200, latest ? history.filter(s => s.account === latest.account) : []);
+    if (req.method === 'POST' && url.pathname === '/api/reminders') {
+      let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)return json(413,{error:'请求过大'});}
+      const input=JSON.parse(body),current=state(0).advice;
+      if(typeof input.id!=='string'||!current.alertKey||input.id!==current.alertKey)return json(409,{error:'建议已更新，请重新查看'});
+      if(input.action==='snooze'){reminderPreferences.snoozeUntil=Date.now()+30*60000;reminderPreferences.snoozeId=input.id;reminderPreferences.delivered=null;}
+      else if(input.action==='dismiss')reminderPreferences.dismissed=input.id;
+      else if(input.action==='delivered')reminderPreferences.delivered=input.id;
+      else return json(400,{error:'无效操作'});
+      await saveReminders();return json(200,state());
+    }
     if (req.method === 'POST' && url.pathname === '/api/refresh') {
       if (url.searchParams.get('force') === '1' || !latest || Date.now() - latest.at >= 30000) await refresh();
       schedulePoll();
@@ -144,6 +167,7 @@ const server = http.createServer(async (req, res) => {
       const next = settings({ ...JSON.parse(body), manualAccount: latest?.account });
       await writeFile(configFile + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 });
       await rename(configFile + '.tmp', configFile); config = next;
+      if(!demo)speedReader.configure(config.speedSources);
       if(latest&&!validationWarning)await updatePlan(latest);
       return json(200, state(days));
     }
@@ -152,6 +176,6 @@ const server = http.createServer(async (req, res) => {
 });
 server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已被占用，请检查是否已经启动。` : e.message); process.exit(1); });
 server.listen(port, '127.0.0.1', () => { console.log(`Codex Usage Planner: ${origin}${demo ? ' (DEMO)' : ''}`); refresh().then(schedulePoll); });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { poller.stop(); server.close(); process.exit(0); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { poller.stop(); speedReader.close(); server.close(); process.exit(0); });
 
-if(process.env.PLANNER_PARENT_PID){const parent=Number(process.env.PLANNER_PARENT_PID);setInterval(()=>{try{process.kill(parent,0);}catch{poller.stop();server.close();process.exit(0);}},5000).unref();}
+if(process.env.PLANNER_PARENT_PID){const parent=Number(process.env.PLANNER_PARENT_PID);setInterval(()=>{try{process.kill(parent,0);}catch{poller.stop();speedReader.close();server.close();process.exit(0);}},5000).unref();}

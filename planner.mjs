@@ -35,19 +35,20 @@ export function createPlan(window,snapshot,config,now=snapshot.at,policy={}){
  // At identical redemption times and consumed/wasted quota, future states are identical.
  // Keep the smallest squared workload for each quota class, not just the lowest prefix peak.
  // All paths end at the same horizon; unfinished final quota is retained, never discarded.
- function solve(candidates){let states=[origin];for(const card of cards){const next=[];for(const t of candidates){if(!cardTimeAllowed(t)||t<=now||t>=card.expiresAt||t<(card.grantedAt||now))continue;const frontier=new Map();for(const state of states){if(t<=state.at+EPS)continue;const candidate=extend(state,t,'card',card);if(candidate){const key=candidate.quota+':'+candidate.waste,old=frontier.get(key);if(!old||candidate.squares<old.squares)frontier.set(key,candidate);}}next.push(...frontier.values());}states=next;if(!states.length)return null;}
+ const allowed=t=>config.workHours?.length?clock.rows.some(r=>r.weight>0&&r.intervals.some(([a,b])=>t>=a&&t<=b-15*60000)):cardTimeAllowed(t);
+ function solve(candidates){let states=[origin];for(const card of cards){const next=[];for(const t of candidates){if(!allowed(t)||t<=now||t>=card.expiresAt-(config.workHours?.length?15*60000:0)||t<(card.grantedAt||now))continue;const frontier=new Map();for(const state of states){if(t<=state.at+EPS)continue;const candidate=extend(state,t,'card',card);if(candidate){const key=candidate.quota+':'+candidate.waste,old=frontier.get(key);if(!old||candidate.squares<old.squares)frontier.set(key,candidate);}}next.push(...frontier.values());}states=next;if(!states.length)return null;}
    let best=null;for(const state of states){const end=horizon;const terminal=extend(state,end,horizon===window.resetsAt?'natural':'horizon');if(!terminal)continue;const work=clock.work(now,end),mean=work?terminal.quota/work:0;terminal.variance=work?Math.max(0,terminal.squares/work-mean*mean):0;terminal.mean=mean;const cmp=best?(terminal.waste-best.waste||terminal.variance-best.variance||best.quota-terminal.quota||terminal.peak-best.peak):-1;if(cmp<0)best=terminal;}return best;}
  let chosen=solve([...initialCandidates].sort((a,b)=>a-b));
  function unpack(state){const parts=[];while(state?.previous){parts.unshift(...state.segments);state=state.previous;}return parts;}
  if(chosen&&cards.length){const fine=new Set();for(const s of unpack(chosen).filter(s=>s.event==='card'))for(let delta=-3600000;delta<=3600000;delta+=5*60000)fine.add(s.end+delta);for(const c of cards)fine.add(c.expiresAt-EPS);const refined=solve([...fine].sort((a,b)=>a-b));if(refined&&(refined.waste<chosen.waste||refined.waste===chosen.waste&&(refined.variance<chosen.variance||refined.variance===chosen.variance&&refined.quota>chosen.quota)))chosen=refined;}
- if(!chosen)return {anchorAt:now,segments:[],daily:[],schedule:[],warnings:[...warnings,'没有找到满足到期时间及北京时间09:30–22:00用卡时段的计划。'],infeasible:true};
+ if(!chosen)return {anchorAt:now,segments:[],daily:[],schedule:[],warnings:[...warnings,'没有找到留有操作时间且满足工作时段的容量参考计划；不用卡仍是有效选择。'],infeasible:true};
  const segments=unpack(chosen),end=segments.at(-1).end;
  const daily=clock.rows.filter(r=>r.end>now&&r.start<end).map(row=>({...row,amount:segments.reduce((sum,s)=>sum+s.rate*clock.work(Math.max(row.start,s.start),Math.min(row.end,s.end)),0),events:segments.filter(s=>s.event!=='horizon'&&dateKey(s.end,config.calendarTimezone)===row.date).map(s=>({type:s.event,at:s.end}))}));
  if(chosen.waste>0.001)warnings.push('有完整额度窗口落在休息日，无法用完；已单独列出预计浪费，未把用量强塞进假期。');
  return {anchorAt:now,account:snapshot.account,hasExpiringCards:all.length>0,initialRemaining:window.remaining,initialReset:window.resetsAt,horizon,end,segments,daily,
   schedule:segments.filter(s=>s.event==='card').map(s=>({...s.card,plannedAt:s.end,overdue:false})),
   consumed:chosen.quota,retained:segments.at(-1).retained||0,peak:chosen.peak,mean:chosen.mean,variance:chosen.variance,waste:chosen.waste,warnings,
-  calendarTimezone:config.calendarTimezone,search:'小时候选搜索 + 5分钟局部细化；额度按实际毫秒和有效工作日核算',version:5};
+  referenceOnly:true,calendarTimezone:config.calendarTimezone,search:'小时候选搜索 + 5分钟局部细化；额度按实际毫秒和有效工作日核算',version:5};
 }
 export function plannedRemaining(plan,now,config){
  if(!plan?.segments?.length)return null;const s=plan.segments.find(s=>now>=s.start&&now<s.end);if(!s)return now>=plan.end?0:plan.initialRemaining;

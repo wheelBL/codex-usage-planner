@@ -16,7 +16,9 @@ APP="$STAGING/Codex Usage Planner.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/server" "$PWD/.build/module-cache"
 xcrun swiftc -O -target "$(uname -m)-apple-macosx13.0" -module-cache-path "$PWD/.build/module-cache" macos/UsageState.swift macos/main.swift -o "$APP/Contents/MacOS/CodexUsagePlanner" -framework AppKit -framework WebKit
 cp ./*.mjs "$APP/Contents/Resources/server/"
+cp ssh-speed-helper.py "$APP/Contents/Resources/server/"
 cp -R public "$APP/Contents/Resources/server/"
+cp -R licenses "$APP/Contents/Resources/server/"
 cp "$NODE" "$APP/Contents/Resources/node"
 # Keep the runtime license alongside the bundled executable when supplied by its distribution.
 NODE_ROOT="$(dirname "$(dirname "$NODE")")"
