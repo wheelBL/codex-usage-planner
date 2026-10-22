@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test",
+    "benchmark": "node scripts/benchmark.mjs",
     "demo": "node server.mjs --demo"
   },
   "engines": {

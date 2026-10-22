@@ -8,9 +8,16 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
         node: [20, 24]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Select Python for collector integration
+        shell: bash
+        run: echo "PLANNER_TEST_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
       - run: npm test

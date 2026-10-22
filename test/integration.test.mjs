@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +54,12 @@ test('HTTP protections, exact settings and durable history',async()=>{
    const summary=await (await fetch(origin+'/api/summary',{headers})).json();assert.deepEqual(summary.history,[]);
    assert.equal(JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')).timezone,'America/Los_Angeles');
    assert.ok((await readFile(path.join(dir,'history.jsonl'),'utf8')).includes('naturalTarget'));
+   assert.equal((await fetch(origin+'/client.js')).status,200,'browser request module is served');
+   const writes=await Promise.all(Array.from({length:8},(_,i)=>fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...afterSave.config,timezone:i%2?'UTC':'Asia/Tokyo'})}).then(async response=>({status:response.status,body:await response.json()}))));
+   assert.ok(writes.every(r=>r.status===200),JSON.stringify(writes.map(r=>r.body.error)));
+   const final=await (await fetch(origin+'/api/state',{headers})).json();
+   assert.deepEqual(final.config,JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')),'concurrent saves leave disk and memory consistent');
+   assert.equal(final.plan.anchorAt,anchor,'concurrent display-only saves preserve the fixed baseline');
  } finally {child.kill();}
 });
 
@@ -67,4 +73,17 @@ test('native host secret authenticates only its own server', async()=>{
    assert.equal(response?.status,200);
    assert.equal((await fetch(origin+'/api/summary',{headers:{'X-Planner-Token':'b'.repeat(64)}})).status,403);
  } finally { child.kill(); }
+});
+
+test('reopening demo data preserves the reset boundary without false pending verification',async()=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'codex-planner-demo-reopen-'));
+ const now=Date.now(),reset=Math.floor((now+86400000)/1000)*1000;
+ await writeFile(path.join(dir,'history.jsonl'),JSON.stringify({at:now-600000,account:'demo',windows:[{key:'codex:primary',name:'codex',bucket:'codex',duration:604800000,remaining:80,resetsAt:reset}],availableCount:0,creditsKnown:true,credits:[]})+'\n');
+ const token='d'.repeat(64),port=47000+Math.floor(Math.random()*1000),origin=`http://127.0.0.1:${port}`;
+ const child=spawn(process.execPath,['server.mjs','--demo'],{cwd:root,env:{...process.env,PORT:String(port),PLANNER_DATA_DIR:dir,PLANNER_SESSION_TOKEN:token},stdio:'ignore',windowsHide:true});
+ try{
+  let state;
+  for(let i=0;i<100;i++){try{state=await (await fetch(origin+'/api/state',{headers:{'X-Planner-Token':token}})).json();if(state.latest?.at>now&&!state.refreshing)break;}catch{}await pause(50);}
+  assert.ok(state.latest.at>now,'fresh demo sample');assert.equal(state.windows[0].resetsAt,reset);assert.equal(state.validationWarning,null);assert.equal(state.stale,false);
+ }finally{child.kill();}
 });

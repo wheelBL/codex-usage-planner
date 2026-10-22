@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {overview, dayKey, parseHourRows} from '../public/view-model.js';
+import {overview, dayKey, parseHourRows, parseDayOverrides} from '../public/view-model.js';
 const state={now:Date.parse('2026-10-07T01:00:00Z'),config:{calendarTimezone:'Asia/Shanghai'},latest:{creditsKnown:false},plan:{daily:[{date:'2026-10-07',weight:0,amount:0,reason:'国庆'},{date:'2026-10-08',weight:1,amount:50,reason:'工作日'}]}};
 const w={bucket:'codex',duration:604800000,remaining:100};
 test('rest day zero budget is distinct from missing plan',()=>{const m=overview(state,w);assert.equal(m.today.amount,0);assert.match(m.advice,/仍可正常使用/);assert.equal(m.next.amount,50);assert.equal(overview({...state,plan:null},w).today,undefined);});
@@ -9,6 +9,11 @@ test('other windows do not inherit the main weekly plan',()=>{assert.equal(overv
 test('calendar days honor selected timezone',()=>{assert.equal(dayKey(Date.parse('2026-10-06T20:00:00Z'),'Asia/Shanghai'),'2026-10-07');assert.equal(dayKey(Date.parse('2026-10-06T20:00:00Z'),'America/Los_Angeles'),'2026-10-06');});
 test('editable work hours round-trip three segments and end-of-day',()=>{assert.deepEqual(parseHourRows([['09:00','11:45'],['14:00','17:30'],['19:00','22:00']]),[[540,705],[840,1050],[1140,1320]]);assert.deepEqual(parseHourRows([['19:00','00:00']]),[[1140,1440]]);assert.deepEqual(parseHourRows([]),[]);});
 test('invalid, reversed and overlapping work periods rejected before saving',()=>{for(const rows of [[['','12:00']],[['13:00','12:00']],[['09:00','12:00'],['11:00','14:00']]])assert.throws(()=>parseHourRows(rows));});
+test('day overrides reject duplicate dates and invalid values without silently dropping a row',()=>{
+ assert.deepEqual(parseDayOverrides('2026-10-22=0\n\n2026-10-23=0.5'),{'2026-10-22':0,'2026-10-23':0.5});
+ for(const text of ['2026-02-30=1','2026-10-22=','2026-10-22=NaN','2026-10-22=3','2026-10-22=1\n2026-10-22=0'])assert.throws(()=>parseDayOverrides(text),/第 \d+ 行/);
+ assert.throws(()=>parseHourRows(Array.from({length:9},()=>['09:00','10:00'])),/最多8段/);
+});
 
 
 test('live TPS labels retain measured values without inventing streaming token counts',async()=>{

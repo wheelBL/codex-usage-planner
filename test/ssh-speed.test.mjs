@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
+import {once} from 'node:events';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
 import {mkdtemp,mkdir,writeFile,appendFile,rm} from 'node:fs/promises';
@@ -49,11 +50,16 @@ test('remote framing preserves partial UTF-8, keeps old samples on disconnect an
 });
 
 test('real Python helper matches the local meter, strips content, handles partial append and truncation',async t=>{
+ const python=process.env.PLANNER_TEST_PYTHON||(process.platform==='win32'?'python':'python3');
+ const probe=spawnSync(python,['-c','import sys; sys.exit(sys.version_info.major != 3)'],{stdio:'ignore',windowsHide:true,timeout:5000});
+ if(probe.error||probe.status!==0){t.skip('Python 3 unavailable; set PLANNER_TEST_PYTHON to its executable');return;}
  const home=await mkdtemp(path.join(os.tmpdir(),'ssh-tps-')),dir=path.join(home,'sessions/2024/01/01'),file=path.join(dir,'resumed.jsonl');await mkdir(dir,{recursive:true});
  const records=rows('resumed');await writeFile(file,records.map(JSON.stringify).join('\n')+'\n');
  let raw='',child;
- const reader=new SSHSpeedReader(speedSources([{target:'example.invalid',home}])[0],{spawnImpl:(_cmd,_args,opts)=>{
-  child=spawn('python3',['-u','-',home],opts);child.stdout.on('data',chunk=>{raw+=chunk.toString();});return child;
+ // The production collector targets POSIX hosts; this fixture runs locally,
+ // where Windows temp paths must not be validated as remote SSH directories.
+ const reader=new SSHSpeedReader(speedSources([{target:'example.invalid',home:'/fixture'}])[0],{spawnImpl:(_cmd,_args,opts)=>{
+  child=spawn(python,['-u','-',home],opts);child.stdout.on('data',chunk=>{raw+=chunk.toString();});return child;
  }});
  try{
   await reader.start();await waitUntil(()=>reader.info().connected||reader.status==='error');
@@ -67,7 +73,7 @@ test('real Python helper matches the local meter, strips content, handles partia
   await appendFile(file,extra.slice(0,-4));const checked=reader.checkedAt;await waitUntil(()=>reader.checkedAt>checked);assert.equal(reader.snapshot().selected.count,1);
   await appendFile(file,extra.slice(-4));await waitUntil(()=>reader.snapshot().selected?.count===2);assert.equal(reader.snapshot().selected.last.tps,120);assert.equal(raw.includes('秘密正文'),false);
   await writeFile(file,rows('replacement').map(JSON.stringify).join('\n')+'\n');await waitUntil(()=>reader.snapshot().selected?.session==='replacement');assert.equal(reader.snapshot().selected.count,1);
- }finally{reader.close();await rm(home,{recursive:true,force:true});}
+ }finally{const exited=child&&child.exitCode===null&&child.signalCode===null?once(child,'close'):null;reader.close();if(exited)await exited;await rm(home,{recursive:true,force:true});}
 });
 
 test('all connected hosts participate; same session ID is isolated, clock skew does not change TPS, stale host falls back',async()=>{

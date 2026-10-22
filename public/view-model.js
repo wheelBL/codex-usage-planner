@@ -1,5 +1,6 @@
 // Shared, DOM-free presentation rules for both desktop hosts.
-export const formatAmount = value => Number.isFinite(value) ? new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 2}).format(value) : '—';
+const amountFormatter=new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 2});
+export const formatAmount = value => Number.isFinite(value) ? amountFormatter.format(value) : '—';
 export function dayKey(at, timezone) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(at).map(x => [x.type,x.value]));
   return `${p.year}-${p.month}-${p.day}`;
@@ -17,6 +18,7 @@ export function overview(state, window) {
     advice: stale ? '当前数据尚未确认，请刷新后再安排用量。' : blocked ? '服务端当前不允许普通额度使用，请在 Codex 中检查状态。' : !today ? '此窗口显示实际剩余；每日预算以主额度周窗口为准。' : !today.weight ? '休息日计划预算为 0。仍可正常使用，以实际剩余额度为准。' : '预算是计划建议，实际消耗取决于任务。可在每日计划中查看安排。'};
 }
 export function parseHourRows(rows) {
+  if(rows.length>8)throw new Error('工作时段最多8段');
   let previous = -1;
   return rows.map(([a,b],index) => {
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(a) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(b)) throw new Error(`第 ${index+1} 段：请填写开始和结束时间`);
@@ -26,6 +28,21 @@ export function parseHourRows(rows) {
     if (start<previous) throw new Error(`第 ${index+1} 段：请按时间排序，时段不能重叠`);
     previous=end; return [start,end];
   });
+}
+
+export function parseDayOverrides(text) {
+ const result={};
+ for(const [index,line] of text.split('\n').entries()) {
+  if(!line.trim())continue;
+  const parts=line.split('='),date=parts[0].trim(),value=parts[1]?.trim();
+  const parsed=Date.parse(date+'T00:00:00Z');
+  if(parts.length!==2||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(parsed)||new Date(parsed).toISOString().slice(0,10)!==date||!value||!Number.isFinite(Number(value))||Number(value)<0||Number(value)>2)
+   throw new Error(`第 ${index+1} 行：请填写 YYYY-MM-DD=强度，日期需有效，强度为 0–2`);
+  if(Object.hasOwn(result,date))throw new Error(`第 ${index+1} 行：${date} 重复，请只保留一行`);
+  result[date]=Number(value);
+ }
+ if(Object.keys(result).length>366)throw new Error('自定义日期最多366天');
+ return result;
 }
 
 export function speedOverview(data,now=Date.now(),connected=true){
