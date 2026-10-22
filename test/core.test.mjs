@@ -13,6 +13,15 @@ test('2026 official holidays and makeup weekends',()=>{assert.equal(dayInfo('202
 test('personal days override holidays and makeup dates',()=>{const c=settings({dayOverrides:{'2026-09-20':0,'2026-10-01':0.5}});assert.equal(dayInfo('2026-09-20',c).weight,0);assert.equal(dayInfo('2026-10-01',c).weight,0.5);});
 test('unknown holiday years are not silently certified',()=>assert.equal(dayInfo('2027-10-01',cfg).verified,false));
 test('DST day is 25 real hours but one weighted workday',()=>{const c=settings({calendar:'weekends',calendarTimezone:'America/Los_Angeles',restWeight:1}),a=midnight('2026-11-01',c.calendarTimezone),b=midnight('2026-11-02',c.calendarTimezone);assert.equal(b-a,25*3600000);close(makeClock(a,b,c).work(a,b),1);});
+test('warm calendar caches keep timezones, DST and changed work schedules isolated',()=>{
+ const date='2026-11-01',sh=midnight(date,'Asia/Shanghai'),la=midnight(date,'America/Los_Angeles');assert.notEqual(sh,la);
+ assert.equal(midnight(date,'Asia/Shanghai'),sh);assert.equal(midnight(date,'America/Los_Angeles'),la);
+ const base=settings({calendar:'weekends',restWeight:1,workHours:[[540,720]]});
+ const next=midnight('2026-11-02','Asia/Shanghai');
+ assert.equal(makeClock(sh,next,base).work(sh,sh+12*3600000),1);
+ assert.equal(makeClock(sh,next,{...base,workHours:[[840,1080]]}).work(sh,sh+12*3600000),0);
+ assert.equal(makeClock(sh,next,{...base,dayOverrides:{[date]:0}}).work(sh,next),0);
+});
 test('exact partial working day and timezone-equivalent instant',()=>{assert.equal(at,instant('2026-09-15T02:30:00Z'));const clock=makeClock(at,reset,cfg);close(clock.work(at,reset),3.5625);});
 test('current interval participates in smoothing and can move natural reset',()=>{assert.equal(plan.segments[0].event,'card');assert.ok(plan.segments[0].end<reset);assert.ok(Math.abs(plan.segments[0].rate-plan.segments[1].rate)<14);assert.ok(Math.sqrt(plan.variance)<8.6);});
 test('joint plan reduces old 19-to-21 spike',()=>{const oldWork=makeClock(reset,instant('2026-09-21T00:00:00+08:00'),cfg).work(reset,instant('2026-09-21T00:00:00+08:00'));assert.ok(plan.peak<100/oldWork);});

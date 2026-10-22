@@ -6,6 +6,7 @@ native/webview-sdk.zip
 native/*preview.png
 native/icon-*.png
 native/smoke-result.json
+native/ui-smoke-result.json
 *.log
 .env*
 auth.json

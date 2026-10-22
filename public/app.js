@@ -1,21 +1,35 @@
-import {formatAmount, dayKey, overview, parseHourRows, speedOverview} from './view-model.js';
+import {formatAmount, dayKey, overview, parseHourRows, parseDayOverrides, speedOverview} from './view-model.js';
+import {createApiClient,createLatestRead} from './client.js';
 const $ = id => document.getElementById(id);
-if(new URLSearchParams(location.search).has('embedded'))document.body.classList.add('embedded');
+const embedded=new URLSearchParams(location.search).has('embedded');
+if(embedded)document.body.classList.add('embedded');
+let activePane='overview',dirty=false,mutationBusy=false,planSignature='';
 function navigate(name) {
+  activePane=name;
   for(const pane of document.querySelectorAll('[data-pane]')) pane.hidden=pane.dataset.pane!==name;
   for(const button of document.querySelectorAll('[data-tab]')) {const active=button.dataset.tab===name;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
-  window.scrollTo(0,0); requestAnimationFrame(()=>{draw();drawGauge();});
+  window.scrollTo(0,0); requestAnimationFrame(()=>{if(state){if(name==='plan')renderPlan();if(name==='history')renderHistory();}draw();drawGauge();});
 }
 for(const tab of document.querySelectorAll('[data-tab]')) tab.addEventListener('click',()=>navigate(tab.dataset.tab));
 const token = document.querySelector('meta[name="planner-token"]').content;
 let state, selected, initialized = false, plotted = [], speedSelection='';
 let speedRequest=0, speedLoading=false, recentSpeed=null, speedConnected=true;
 const pct = n => n == null ? '—' : `${n.toFixed(2)}%`;
-const date = (t, short = false) => t == null ? '未知' : new Intl.DateTimeFormat('zh-CN', { timeZone: state?.config?.timezone||'Asia/Shanghai',
-  month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', ...(short ? {} : {year:'numeric',second:'2-digit',timeZoneName:'shortOffset'}), hourCycle:'h23' }).format(t);
-async function api(route, value) {
-  const response = await fetch(`/api/${route}?days=${$('range').value}`, { method: value === undefined ? 'GET' : 'POST', headers: { 'X-Planner-Token':token, 'Content-Type':'application/json' }, body:value === undefined ? undefined : JSON.stringify(value) });
-  const result = await response.json(); if (!response.ok) throw new Error(result.error); return result;
+const dateFormats=new Map();
+const date = (t, short = false) => {
+ if(t==null)return '未知';
+ const zone=state?.config?.timezone||'Asia/Shanghai',key=zone+':'+short;
+ if(!dateFormats.has(key)){if(dateFormats.size>=16)dateFormats.clear();dateFormats.set(key,new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',...(short?{}:{year:'numeric',second:'2-digit',timeZoneName:'shortOffset'}),hourCycle:'h23'}));}
+ return dateFormats.get(key).format(t);
+};
+const request=createApiClient({token});
+const api=(route,value,options={})=>request(route,value,{...options,params:{days:$('range').value,...options.params}});
+function selectValue(id,value){const field=$(id);if(![...field.options].some(o=>o.value===String(value)))field.add(new Option(String(value),String(value)));field.value=String(value);}
+function populateSettings(config){
+ for(const [id,key]of [['timezone','timezone'],['calendar-timezone','calendarTimezone'],['calendar','calendar'],['rest-weight','restWeight']])selectValue(id,config[key]);
+ renderHours(config.workHours||[]);$('reminders-enabled').checked=config.remindersEnabled===true;
+ $('overrides').value=Object.entries(config.dayOverrides).map(([d,w])=>d+'='+w).join('\n');
+ $('manual').value=config.manualCredits.map(c=>c.expiresAt).join('\n');renderSSH(config.speedSources||[]);initialized=true;$('save-settings').disabled=false;
 }
 function render(next) {
   state = next;
@@ -23,11 +37,8 @@ function render(next) {
   $('window').replaceChildren(...state.windows.map(w => new Option(`${w.name} · ${w.duration == null ? '未知窗口' : w.duration / 3600000 + ' 小时'}`, w.key)));
   selected = state.windows.some(w => w.key === old) ? old : (state.windows.find(w => w.bucket === 'codex' && w.duration === 604800000) || state.windows[0])?.key;
   if (selected) $('window').value = selected;
-  if (!initialized) {
-    if (![...$('timezone').options].some(o => o.value === state.config.timezone)) $('timezone').add(new Option(state.config.timezone));
-    $('timezone').value = state.config.timezone; $('calendar-timezone').value=state.config.calendarTimezone; $('calendar').value=state.config.calendar; $('rest-weight').value=state.config.restWeight; renderHours(state.config.workHours||[]); $('reminders-enabled').checked=state.config.remindersEnabled===true; $('overrides').value=Object.entries(state.config.dayOverrides).map(([d,w])=>d+'='+w).join('\n');
-    $('manual').value = state.config.manualCredits.map(c => c.expiresAt).join('\n'); renderSSH(state.config.speedSources||[]); initialized = true;
-  }
+  if (!initialized) populateSettings(state.config);
+  $('retry-connection').hidden=true;
   $('status').className = state.stale || state.demo || state.persistenceError ? 'warn' : '';
   $('status').textContent = [state.demo ? '演示模式 · 示例数据，与真实历史隔离。' : '本机 Codex 状态',
     state.error ? state.error+(state.refreshing?' · 正在重试':state.nextPollAt?' · 下次检查 '+date(state.nextPollAt,true):'') : (state.stale ? '等待新数据；旧快照不可视为当前额度。' : '已连接 · 自动记录中'),
@@ -35,7 +46,7 @@ function render(next) {
   $('sample').textContent = state.latest ? `${date(state.latest.at,true)} 更新` : '尚未更新';
   const w = state.windows.find(w => w.key === selected);
   renderOverview(w);
-  if (!w) { for(const id of ['actual','target','gap','speed','credits-count','reset','deadline','natural'])$(id).textContent='—'; $('actual-detail').textContent='等待有效数据'; $('credits').replaceChildren(); renderPlan(); draw(); return; }
+  if (!w) { for(const id of ['actual','target','gap','speed','credits-count','reset','deadline','natural'])$(id).textContent='—'; $('actual-detail').textContent='等待有效数据'; $('credits').replaceChildren(); renderPlan();if(activePane==='history')renderHistory();draw(); return; }
   $('actual').textContent = w.remaining == null ? '—' : formatAmount(w.remaining)+'%';
   $('actual-detail').textContent = state.stale || w.staleWindow ? '上次已知值 · 等待有效窗口数据' : '服务端剩余额度';
   $('target').textContent = pct(w.target);
@@ -56,11 +67,13 @@ function render(next) {
   else if (!state.config.manualCredits.length && state.latest.availableCount > state.latest.credits.length) $('credits').append(document.createTextNode('卡片清单不完整，当前计划只包含已知到期时间。'));
   const f = w.forecast;
   $('forecast').textContent = !f || state.stale ? '消耗趋势：需要至少 5 分钟的连续有效样本；断采或重置后重新积累。' : `近 ${((f.until-f.since)/3600000).toFixed(2)} 小时平均消耗 ${f.perDay.toFixed(2)} 百分点/有效工作日；预计自然重置时剩余 ${pct(f.atReset)}。${f.exhaustsAt ? '线性耗尽时间 ' + date(f.exhaustsAt) : '样本期间未观测到额度下降'}。此推算不能保证未来用量。`;
-  renderPlan();
+  if(activePane==='plan')renderPlan();
+  if(activePane==='history')renderHistory();
   const core=state.windows.find(w=>w.bucket==='codex'&&w.duration===7*86400000);if(window.chrome?.webview)window.chrome.webview.postMessage({remaining:core?.remaining??null,gap:core?.gap??null,plannedPerWorkday:core?.plannedPerWorkday??null,reminder:state.reminder,stale:state.stale||core?.remaining==null,error:state.validationWarning||state.error||(state.stale?'数据已过期':'')});
-  draw(); drawGauge();
+  draw();
 }
 function draw() {
+  if(activePane!=='history')return;
   const canvas = $('chart'), box = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   if(!box.width||!box.height)return;
   canvas.width = box.width * dpr; canvas.height = box.height * dpr;
@@ -103,31 +116,58 @@ function draw() {
 }
 $('chart').addEventListener('mousemove',event=>{const x=event.offsetX;const row=plotted.reduce((best,r)=>!best||Math.abs(r.x-x)<Math.abs(best.x-x)?r:best,null);if(row)$('hover').textContent=`${date(row.at)} · 实际剩余 ${pct(row.remaining)}`;});
 $('window').addEventListener('change',()=>{selected=$('window').value;render(state);});
-$('range').addEventListener('change',update);window.addEventListener('resize',()=>{draw();drawGauge();});
-$('refresh').addEventListener('click',async()=>{ $('refresh').disabled=true;try{render(await api('refresh',{}));}catch(e){$('status').textContent=e.message;}finally{$('refresh').disabled=false;} });
-$('settings').addEventListener('submit',async event=>{event.preventDefault();try{
- const dayOverrides={};for(const row of $('overrides').value.split('\n').map(s=>s.trim()).filter(Boolean)){const pair=row.split('=');if(pair.length!==2||!pair[1].trim())throw new Error('每行格式为 YYYY-MM-DD=0 或 YYYY-MM-DD=1');dayOverrides[pair[0].trim()]=Number(pair[1]);}
- const workHours=parseHourRows([...document.querySelectorAll('.hours-row')].map(row=>[...row.querySelectorAll('input')].map(input=>input.value)));
- $('hours-error').textContent='';
- render(await api('settings',{workHours,speedSources:readSSH(),remindersEnabled:$('reminders-enabled').checked,timezone:$('timezone').value,calendarTimezone:$('calendar-timezone').value,calendar:$('calendar').value,restWeight:Number($('rest-weight').value),dayOverrides,manualCredits:$('manual').value.split('\n').map(s=>s.trim()).filter(Boolean).map(expiresAt=>({expiresAt}))}));loadSpeed();$('saved').textContent='已保存并更新计划';
- }catch(e){$('saved').textContent=e.message;$('hours-error').textContent=e.message;}});
-$('replan').addEventListener('click',async()=>{try{render(await api('replan',{}));}catch(e){$('plan-warning').textContent=e.message;}});
+const stateReader=createLatestRead({read:signal=>api('state',undefined,{signal}),onData:render,onError:showConnectionError});
+function update(replace=false){if(mutationBusy)return;return stateReader.load({replace});}
+function showConnectionError(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';$('retry-connection').hidden=false;if(state){state.stale=true;renderOverview(state.windows.find(w=>w.key===selected));drawGauge();$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}
+async function changeState(button,route,value,after=()=>{}){
+ if(mutationBusy)return;
+ mutationBusy=true;stateReader.cancel();
+ const controls=[...document.querySelectorAll('#refresh,#replan,#save-settings,#snooze-advice,#dismiss-advice,#range'),...(route==='settings'?[...$('settings').elements]:[])];
+ const previous=new Map(controls.map(control=>[control,control.disabled]));
+ for(const control of controls)control.disabled=true;
+ button.setAttribute('aria-busy','true');
+ try{const result=await api(route,value);render(result);after(result);return result;}
+ finally{mutationBusy=false;button.removeAttribute('aria-busy');for(const [control,disabled]of previous)control.disabled=disabled;syncLimits();}
+}
+$('range').addEventListener('change',()=>update(true));window.addEventListener('resize',()=>{draw();drawGauge();});
+$('retry-connection').addEventListener('click',()=>update(true));
+$('refresh').addEventListener('click',async()=>{try{await changeState($('refresh'),'refresh',{});}catch(e){showConnectionError(e);}});
+function markDirty(){if(!initialized)return;dirty=true;$('saved').className='';$('saved').textContent='有未保存的更改';}
+$('settings').addEventListener('input',markDirty);$('settings').addEventListener('change',markDirty);
+window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
+$('settings').addEventListener('submit',async event=>{event.preventDefault();if(mutationBusy)return;try{
+ $('hours-error').textContent='';$('overrides-error').textContent='';$('saved').className='';
+ let dayOverrides,workHours;
+ try{dayOverrides=parseDayOverrides($('overrides').value);}catch(e){$('overrides-error').textContent=e.message;$('overrides').closest('details').open=true;$('overrides').focus();throw e;}
+ try{workHours=parseHourRows([...document.querySelectorAll('.hours-row')].map(row=>[...row.querySelectorAll('input')].map(input=>input.value)));}catch(e){$('hours-error').textContent=e.message;$('hours-list').querySelector('input')?.focus();throw e;}
+ const value={workHours,speedSources:readSSH(),remindersEnabled:$('reminders-enabled').checked,timezone:$('timezone').value,calendarTimezone:$('calendar-timezone').value,calendar:$('calendar').value,restWeight:Number($('rest-weight').value),dayOverrides,manualCredits:$('manual').value.split('\n').map(s=>s.trim()).filter(Boolean).map(expiresAt=>({expiresAt}))};
+ $('saved').textContent='正在保存…';
+ await changeState($('save-settings'),'settings',value,result=>{populateSettings(result.config);dirty=false;$('saved').textContent='已保存并更新计划';});loadSpeed();
+ }catch(e){$('saved').className='field-error';$('saved').textContent=e.message;}});
+$('replan').addEventListener('click',async()=>{try{await changeState($('replan'),'replan',{});}catch(e){$('plan-warning').textContent=e.message;}});
 $('export').addEventListener('click',async()=>{try{const rows=await api('export');const url=URL.createObjectURL(new Blob([JSON.stringify(rows,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='codex-usage-history.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){$('status').textContent=e.message;}});
-async function update(){try{render(await api('state'));}catch(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';if(state){state.stale=true;renderOverview(state.windows.find(w=>w.key===selected));drawGauge();$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}}
-for(const [id,action]of [['snooze-advice','snooze'],['dismiss-advice','dismiss']])$(id).addEventListener('click',async()=>{try{render(await api('reminders',{id:state.advice.alertKey,action}));$('reminder-feedback').textContent=action==='snooze'?'30分钟后再提醒':'本次建议不再提醒';}catch(e){$('reminder-feedback').textContent=e.message;}});
+for(const [id,action]of [['snooze-advice','snooze'],['dismiss-advice','dismiss']])$(id).addEventListener('click',async()=>{try{await changeState($(id),'reminders',{id:state.advice.alertKey,action});$('reminder-feedback').textContent=action==='snooze'?'30分钟后再提醒':'本次建议不再提醒';}catch(e){$('reminder-feedback').textContent=e.message;}});
 $('speed-session').addEventListener('change',()=>{speedSelection=$('speed-session').value;loadSpeed();});
 $('speed-panel').addEventListener('toggle',()=>{if($('speed-panel').open)loadSpeed();});
 $('show-speed').addEventListener('click',()=>{speedSelection='';$('speed-panel').open=true;loadSpeed();$('speed-panel').scrollIntoView({block:'start'});});
 $('configure-speed').addEventListener('click',()=>{navigate('settings');$('ssh-settings').scrollIntoView({block:'start'});});
-$('add-ssh').addEventListener('click',()=>{if($('ssh-list').children.length<8)addSSH({id:'ssh-'+crypto.randomUUID(),enabled:true});});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)loadSpeed();});
-$('add-hours').addEventListener('click',()=>addHourRow());
+$('add-ssh').addEventListener('click',()=>{if($('ssh-list').children.length<8){addSSH({id:'ssh-'+crypto.randomUUID(),enabled:true});markDirty();}});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSpeed();update(true);}else if(!embedded)stateReader.cancel();});
+$('add-hours').addEventListener('click',()=>{if($('hours-list').children.length<8){addHourRow();markDirty();}});
 $('show-help').addEventListener('click',()=>{ $('help').open=true; $('help').scrollIntoView({block:'start'}); });
 $('show-credits').addEventListener('click',()=>{ $('usage-details').open=true; $('credits').scrollIntoView({block:'center'}); });
-loadSpeed();setInterval(()=>{renderRecentSpeed();if(!document.hidden)loadSpeed();},1000);
-await update();setInterval(update,15000);
+loadSpeed();setInterval(()=>{if(!document.hidden){renderRecentSpeed();loadSpeed();}},1000);
+await update();setInterval(()=>{if(!document.hidden||embedded)update();},15000);
+
+function renderHistory(){
+ const rows=state.history.filter(s=>s.windows.some(w=>w.key===selected&&w.remaining!=null));
+ $('history-summary').textContent=rows.length?`此范围共 ${rows.length} 次有效采样，显示最近 ${Math.min(50,rows.length)} 次；导出可查看完整历史。`:'所选时段暂无有效采样，成功读取后会自动记录。';
+ $('history-rows').replaceChildren(...rows.slice(-50).reverse().map(s=>{const w=s.windows.find(w=>w.key===selected),row=document.createElement('tr');for(const value of [date(s.at),pct(w.remaining),pct(w.target),pct(w.naturalTarget)]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}return row;}));
+}
 
 function renderPlan(){
+ if(activePane!=='plan')return;
+ const signature=JSON.stringify([state.plan,dayKey(state.now,state.config.calendarTimezone),state.config.timezone]);if(signature===planSignature)return;planSignature=signature;
  const p=state.plan; if(!p){$('plan-summary').textContent='等待有效的主额度周窗口';$('daily-rows').replaceChildren();$('daily-chart').replaceChildren();$('plan-baseline').textContent='';$('plan-warning').textContent='';return;}
  $('plan-summary').textContent='从今天开始安排 · 每工作日平均 '+formatAmount(p.mean)+' 个百分点';
  $('plan-baseline').textContent='有配置工作时段时，仅在工作时段内留出15分钟操作余量；本页不保证实际用量。统一比较至 '+date(p.end)+' · 理论可分配 '+(p.consumed?.toFixed(2)??'—')+' 点，期末保留 '+(p.retained?.toFixed(2)??'—')+' 点。计划基准 '+date(p.anchorAt)+' · 日历时区 '+state.config.calendarTimezone+'。实际使用偏离时保留基准，点击重算可按新余量调整。';
@@ -140,9 +180,10 @@ function renderHours(hours) { $('hours-list').replaceChildren();for(const range 
 function addHourRow(range) {
  const row=document.createElement('div');row.className='hours-row';
  for(const [i,label] of ['开始','结束'].entries()) {const field=document.createElement('label');field.textContent=label;const input=document.createElement('input');input.type='time';input.required=true;input.setAttribute('aria-label',label+'时间');if(range){const n=range[i]%1440;input.value=String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');}field.append(input);row.append(field);}
- const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.addEventListener('click',()=>row.remove());row.append(remove);$('hours-list').append(row);
+ const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.setAttribute('aria-label','移除此工作时段');remove.addEventListener('click',()=>{row.remove();syncLimits();markDirty();$('add-hours').focus();});row.append(remove);$('hours-list').append(row);syncLimits();
  if(!range)row.querySelector('input').focus();
 }
+function syncLimits(){$('add-hours').disabled=$('hours-list').children.length>=8;$('add-ssh').disabled=$('ssh-list').children.length>=8;}
 function renderOverview(w) {
  const model=overview(state,w), {today,next}=model;
  $('today-date').textContent='今天 '+new Intl.DateTimeFormat('zh-CN',{timeZone:state.config.calendarTimezone,month:'long',day:'numeric',weekday:'short'}).format(state.now);
@@ -163,6 +204,7 @@ function renderOverview(w) {
  drawGauge();
 }
 function drawGauge() {
+ if(activePane!=='overview')return;
  const canvas=$('gauge'),box=canvas.getBoundingClientRect();if(!box.width)return;
  const dpr=window.devicePixelRatio||1;canvas.width=box.width*dpr;canvas.height=box.height*dpr;
  const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);const r=box.width/2-12,c=box.width/2;
@@ -178,13 +220,13 @@ function renderRecentSpeed(){
 }
 async function loadSpeed(){
  if(speedLoading)return;
- speedLoading=true;const request=++speedRequest,controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),4000);
- const get=async(selection='')=>{const response=await fetch('/api/speed'+(selection?'?session='+encodeURIComponent(selection):''),{headers:{'X-Planner-Token':token},signal:controller.signal});if(!response.ok)throw new Error();return response.json();};
+ speedLoading=true;const requestId=++speedRequest,controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),4000);
+ const get=(selection='')=>request('speed',undefined,{params:selection?{session:selection}:{},signal:controller.signal,timeout:4000});
  try{
   recentSpeed=await get();speedConnected=true;renderRecentSpeed();renderSourceHealth(recentSpeed.sources||[]);
   const selection=speedSelection;
   const result=selection&&$('speed-panel').open?await get(selection):recentSpeed;
-  if(request===speedRequest&&selection===speedSelection&&(!selection||$('speed-panel').open))renderSpeed(result,true);
+  if(requestId===speedRequest&&selection===speedSelection&&(!selection||$('speed-panel').open))renderSpeed(result,true);
  }catch{speedConnected=false;renderRecentSpeed();$('speed-reason').textContent='日志服务暂不可达，上次读数不能视为当前速度';}
  finally{clearTimeout(timeout);speedLoading=false;}
 }
@@ -212,7 +254,7 @@ function addSSH(source){
  const row=document.createElement('div');row.className='ssh-row';row.dataset.id=source.id;
  const head=document.createElement('div');head.className='ssh-heading';
  const enabled=document.createElement('label');enabled.className='toggle-label';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='ssh-enabled';checkbox.checked=source.enabled!==false;enabled.append(checkbox,'启用此主机');
- const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.addEventListener('click',()=>{row.remove();$('add-ssh').disabled=false;});head.append(enabled,remove);row.append(head);
+ const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.setAttribute('aria-label','移除此 SSH 主机');remove.addEventListener('click',()=>{row.remove();syncLimits();markDirty();$('add-ssh').focus();});head.append(enabled,remove);row.append(head);
  const grid=document.createElement('div');grid.className='form-grid';
  for(const [key,name,placeholder]of [['label','主机名称','例如 v100'],['target','SSH 目标','例如 user@192.0.2.1 或 SSH 别名'],['port','端口（可选）','沿用 SSH 配置，默认22'],['home','远端 Codex 目录（可选）','沿用远端 CODEX_HOME 或 ~/.codex']]){
   const label=document.createElement('label'),input=document.createElement('input');label.textContent=name;input.className='ssh-'+key;input.value=source[key]??'';input.placeholder=placeholder;if(key==='port'){input.type='number';input.min='1';input.max='65535';}input.autocomplete='off';label.append(input);grid.append(label);

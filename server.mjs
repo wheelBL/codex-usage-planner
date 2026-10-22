@@ -3,6 +3,7 @@ import {SpeedReader} from './ssh-speed.mjs';
 import http from 'node:http';
 import {guardSnapshot} from './snapshot-guard.mjs';
 import {createPollScheduler} from './polling.mjs';
+import {createSerialQueue} from './serial.mjs';
 import {describeFailure,failureLabel} from './diagnostics.mjs';
 import { readFile, writeFile, mkdir, rename, appendFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -23,6 +24,7 @@ const hostToken = process.env.PLANNER_SESSION_TOKEN;
 if (hostToken !== undefined && !/^[a-f0-9]{64}$/i.test(hostToken)) throw new Error('Invalid native session token');
 const token = hostToken || randomBytes(24).toString('hex');
 const origin = `http://127.0.0.1:${port}`;
+const mutate = createSerialQueue();
 const reminderFile=path.join(dataDir,'reminders.json');
 let reminderPreferences={enabled:false};
 try{reminderPreferences=JSON.parse(await readFile(reminderFile,'utf8'));}catch{}
@@ -59,11 +61,15 @@ async function updatePlan(snapshot,force=false){
  const key=JSON.stringify(['work-window-v2',snapshot.account,w.resetsAt,planningConfig,availableCards(snapshot,config,Date.now()).map(c=>[c.id,Math.floor(c.expiresAt/1000)])]);
  if(!force&&key===planKey&&plan)return;
  const horizon=plan?.account===snapshot.account&&plan.horizon>Date.now()?plan.horizon:undefined;
- plan=createPlan(w,snapshot,config,Date.now(),{horizon});planKey=key;
- await writeFile(planFile+'.tmp',JSON.stringify({key,plan}),{mode:0o600});await rename(planFile+'.tmp',planFile);
+ const nextPlan=createPlan(w,snapshot,config,Date.now(),{horizon});
+ await writeFile(planFile+'.tmp',JSON.stringify({key,plan:nextPlan}),{mode:0o600});await rename(planFile+'.tmp',planFile);
+ plan=nextPlan;planKey=key;
 }
 let failures = 0, outageSince=null, lastCompaction = Date.now();
-const demoStarted = Date.now();
+// Reopening the demo must not manufacture an early reset that the shared guard
+// (correctly) treats as suspicious. Keep its cycle until the natural boundary.
+const previousDemoReset=latest?.account==='demo'?latest.windows.find(w=>w.bucket==='codex'&&w.duration===7*DAY)?.resetsAt:null;
+const demoStarted = previousDemoReset>Date.now()?previousDemoReset-2*DAY:Date.now();
 function demoSnapshot() {
   const now = Date.now();
   return normalize({ accountId: 'demo', rateLimits: { primary: { usedPercent: 20, windowDurationMins: 10080, resetsAt: Math.floor((demoStarted + 2 * DAY) / 1000) } },
@@ -80,6 +86,7 @@ async function refresh() {
         try { snapshot = await readOAuthUsage({onDiagnostic:recordDiagnostic}); }
         catch (oauthError) {const first=oauthError.diagnostic||describeFailure(oauthError,'oauth-usage');await recordDiagnostic(first);try{snapshot=await readUsage();await recordDiagnostic({stage:'rpc-fallback',category:'recovered'});}catch(rpcError){const second=rpcError.diagnostic||describeFailure(rpcError,'rpc-fallback');await recordDiagnostic(second);throw new Error('OAuth：'+failureLabel(first)+'；RPC：'+failureLabel(second));}}
       }
+      await mutate(async()=>{
       const checked=guardSnapshot(snapshot,guardState);
       await writeFile(guardFile+'.tmp',JSON.stringify(checked.state),{mode:0o600});
       await rename(guardFile+'.tmp',guardFile);
@@ -103,6 +110,7 @@ async function refresh() {
       }
       if(outageSince!==null){await recordDiagnostic({stage:'recovery',category:'recovered',outageMs:Date.now()-outageSince});outageSince=null;}
       error = null; failures = 0;
+      });
     } catch (e) { error = e.message; failures++;outageSince??=Date.now(); }
   })().finally(() => { active = null; });
   return active;
@@ -121,7 +129,7 @@ function state(days = 7) {
   result.speed=demo?{coverage:'演示模式不读取真实日志',sessions:[],selected:null}:speedReader.snapshot();
   return result;
 }
-const files = { '/': ['index.html', 'text/html'], '/view-model.js': ['view-model.js', 'text/javascript'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+const files = { '/': ['index.html', 'text/html'], '/view-model.js': ['view-model.js', 'text/javascript'], '/client.js': ['client.js', 'text/javascript'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
 const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -144,13 +152,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/export') return json(200, latest ? history.filter(s => s.account === latest.account) : []);
     if (req.method === 'POST' && url.pathname === '/api/reminders') {
       let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)return json(413,{error:'请求过大'});}
-      const input=JSON.parse(body),current=state(0).advice;
+      const input=JSON.parse(body);
+      return await mutate(async()=>{
+      const current=state(0).advice;
       if(typeof input.id!=='string'||!current.alertKey||input.id!==current.alertKey)return json(409,{error:'建议已更新，请重新查看'});
       if(input.action==='snooze'){reminderPreferences.snoozeUntil=Date.now()+30*60000;reminderPreferences.snoozeId=input.id;reminderPreferences.delivered=null;}
       else if(input.action==='dismiss')reminderPreferences.dismissed=input.id;
       else if(input.action==='delivered')reminderPreferences.delivered=input.id;
       else return json(400,{error:'无效操作'});
-      await saveReminders();return json(200,state());
+      await saveReminders();return json(200,state(days));
+      });
     }
     if (req.method === 'POST' && url.pathname === '/api/refresh') {
       if (url.searchParams.get('force') === '1' || !latest || Date.now() - latest.at >= 30000) await refresh();
@@ -158,18 +169,23 @@ const server = http.createServer(async (req, res) => {
       return json(200, state(days));
     }
     if (req.method === 'POST' && url.pathname === '/api/replan') {
+      return await mutate(async()=>{
       if(!latest||error||validationWarning||Date.now()-latest.at>150000)return json(409,{error:'请先获取新鲜用量再重算计划'});
       await updatePlan(latest,true);return json(200,state(days));
+      });
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       let body = '';
       for await (const chunk of req) { body += chunk; if (body.length > 16000) return json(413, { error: '配置过大' }); }
-      const next = settings({ ...JSON.parse(body), manualAccount: latest?.account });
+      const input=JSON.parse(body);
+      return await mutate(async()=>{
+      const next = settings({ ...input, manualAccount: latest?.account });
       await writeFile(configFile + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 });
       await rename(configFile + '.tmp', configFile); config = next;
       if(!demo)speedReader.configure(config.speedSources);
       if(latest&&!validationWarning)await updatePlan(latest);
       return json(200, state(days));
+      });
     }
     return json(404, { error: 'Not found' });
   } catch (e) { return json(400, { error: e.message }); }

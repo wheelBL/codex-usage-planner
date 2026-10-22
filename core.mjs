@@ -77,7 +77,9 @@ export function forecast(history, window, account, now = Date.now(), config = nu
   if(window.resetsAt==null||window.resetsAt<=now)return null;
   // Only use the contiguous current cycle and recent samples. A rise means reset/correction.
   const rows = [];
-  for (const s of [...history].reverse()) {
+  // Walk the recent tail without copying up to 90 days of minute samples.
+  for (let i=history.length-1;i>=0;i--) {
+    const s=history[i];
     if (s.account !== account) continue;
     const w = s.windows.find(x => x.key === window.key);
     if (!w || w.resetsAt !== window.resetsAt || w.duration !== window.duration || w.remaining == null || now - s.at > DAY) break;
