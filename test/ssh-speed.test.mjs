@@ -72,7 +72,10 @@ test('real Python helper matches the local meter, strips content, handles partia
   const extra=[row(start,'event_msg',{type:'task_started',turn_id:'turn2'}),row(start,'turn_context',{model:'model',effort:'high'}),row(end,'response_item',{type:'message',role:'assistant',content:'秘密正文🧪'}),row(end,'token_usage_record',{response_id:'r2',session_id:'resumed',turn_id:'turn2',usage:{output_tokens:60},thread_token_usage:{output_tokens:160}})].map(JSON.stringify).join('\n')+'\n';
   await appendFile(file,extra.slice(0,-4));const checked=reader.checkedAt;await waitUntil(()=>reader.checkedAt>checked);assert.equal(reader.snapshot().selected.count,1);
   await appendFile(file,extra.slice(-4));await waitUntil(()=>reader.snapshot().selected?.count===2);assert.equal(reader.snapshot().selected.last.tps,120);assert.equal(raw.includes('秘密正文'),false);
-  await writeFile(file,rows('replacement').map(JSON.stringify).join('\n')+'\n');await waitUntil(()=>reader.snapshot().selected?.session==='replacement');assert.equal(reader.snapshot().selected.count,1);
+  await writeFile(file,rows('replacement').map(JSON.stringify).join('\n')+'\n');
+  // Metadata can arrive before the replacement file's response frames.
+  await waitUntil(()=>{const selected=reader.snapshot().selected;return selected?.session==='replacement'&&selected.count===1;});
+  assert.equal(reader.snapshot().selected.count,1);
  }finally{const exited=child&&child.exitCode===null&&child.signalCode===null?once(child,'close'):null;reader.close();if(exited)await exited;await rm(home,{recursive:true,force:true});}
 });
 

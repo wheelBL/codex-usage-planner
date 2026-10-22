@@ -29,7 +29,7 @@ test('HTTP protections, exact settings and durable history',async()=>{
    for(let i=0;i<100;i++){state=await (await fetch(origin+'/api/state',{headers})).json();if(state.latest)break;await pause(30);}
    assert.equal(state.config.remindersEnabled,false);
    assert.equal(state.reminder,null);
-   assert.ok(state.advice.kind);
+   assert.equal(state.advice.kind,'demo');
    assert.equal((await fetch(origin+'/api/speed')).status,403);
    const speed=await (await fetch(origin+'/api/speed',{headers})).json();assert.deepEqual(speed.sessions,[]);assert.equal(speed.selected,null);
    assert.equal((await fetch(origin+'/api/reminders',{method:'POST',headers,body:JSON.stringify({action:'dismiss'})})).status,409);
