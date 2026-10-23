@@ -89,7 +89,7 @@ export class SpeedReader {
  }
  update(){return this.local.update();}
  snapshot(selection=null){
-  const local=this.local.snapshot(),localInfo={id:'local',kind:'local',label:'本机',connected:local.checkedAt!==null&&this.now()-local.checkedAt<=10000,checkedAt:local.checkedAt,status:'ready',error:null};
+  const local=this.local.snapshot(),localInfo={id:'local',kind:'local',label:'本机',connected:!local.error&&local.checkedAt!==null&&this.now()-local.checkedAt<=10000,checkedAt:local.checkedAt,status:local.error?'error':local.checkedAt===null?'connecting':'ready',error:local.error||null};
   const readers=[{reader:this.local,data:local,info:localInfo},...[...this.remotes.values()].map(reader=>({reader,data:reader.snapshot(),info:reader.info()}))];
   const key=(info,session)=>`${info.id}|${session}`;
   const sessions=readers.flatMap(({data,info})=>data.sessions.map(s=>({...s,key:key(info,s.session),source:info}))).sort((a,b)=>b.lastAt-a.lastAt);

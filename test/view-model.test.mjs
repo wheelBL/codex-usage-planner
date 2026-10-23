@@ -29,3 +29,27 @@ test('SSH speed identifies the host and never presents a disconnected source as 
  assert.match(speedOverview(data,now).caption,/v100.*已更新/);assert.match(speedOverview(data,now).title,/v100/);
  const old={...data,selected:{...data.selected,source:{...data.selected.source,connected:false}}};assert.match(speedOverview(old,now).caption,/连接中断.*旧读数/);assert.equal(speedOverview(old,now).inactive,true);
 });
+
+ test('selected windows isolate weekly advice and stale readings suppress actions',()=>{
+ const advice={title:'可考虑用卡',detail:'当前剩余0%',alertKey:'card'};
+ const current={...state,advice};
+ assert.equal(overview(current,w).cardAdvice,advice);
+ for(const other of [{...w,bucket:'spark'},{...w,duration:18000000}]){
+ const view=overview(current,other);assert.equal(view.cardAdvice,null);assert.notEqual(view.title,advice.title);
+ }
+ assert.equal(overview({...current,stale:true},w).cardAdvice,null);
+ });
+ test('forecast distinguishes slow consumption, zero consumption and stale readings',async()=>{
+ const {forecastDescription}=await import('../public/view-model.js');
+ const now=10000000,f={since:now-31*60000,until:now,perDay:0.46,atReset:76.75,exhaustsAt:null};
+ const describe=(s={},forecast=f)=>forecastDescription({now,...s},{forecast},String);
+ assert.match(describe(),/仍有剩余/);assert.doesNotMatch(describe(),/未观测/);
+ assert.match(describe({}, {...f,perDay:0}),/未观测/);
+ assert.match(describe({stale:true}),/过期/);assert.doesNotMatch(describe({stale:true}),/至少5分钟/);
+ assert.match(describe({validationWarning:'pending'}),/核验/);
+ });
+ test('unavailable log sources report errors without waiting for samples',async()=>{
+ const {speedOverview}=await import('../public/view-model.js');
+ const view=speedOverview({checkedAt:100,selected:null,sources:[{connected:false,status:'error',error:'目录不存在'}]},100);
+ assert.equal(view.unavailable,true);assert.match(view.caption,/目录不存在/);
+ });

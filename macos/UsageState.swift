@@ -23,6 +23,7 @@ struct SpeedSnapshot: Decodable {
         let value = String(format: "%.1f TPS", sample.tps) + (selected?.source?.kind == "ssh" ? "·SSH" : "")
         if now - sample.at > 300000 { return value + "·旧" }
         if selected?.status == "idle" { return value + "·闲" }
+        if selected?.status == "waiting" { return value + "·待确认" }
         if selected?.status == "unmeasurable" { return value + "·上次" }
         return value
     }

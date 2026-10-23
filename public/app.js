@@ -1,4 +1,4 @@
-import {formatAmount, dayKey, overview, parseHourRows, parseDayOverrides, speedOverview} from './view-model.js';
+import {formatAmount, dayKey, overview, forecastDescription, parseHourRows, parseDayOverrides, speedOverview} from './view-model.js';
 import {createApiClient,createLatestRead} from './client.js';
 const $ = id => document.getElementById(id);
 const embedded=new URLSearchParams(location.search).has('embedded');
@@ -50,7 +50,7 @@ function render(next) {
   $('actual').textContent = w.remaining == null ? '—' : formatAmount(w.remaining)+'%';
   $('actual-detail').textContent = state.stale || w.staleWindow ? '上次已知值 · 等待有效窗口数据' : '服务端剩余额度';
   $('target').textContent = pct(w.target);
-  $('target-detail').textContent = w.overdue ? '计划时间已过，请调整预算或在 Codex 中处理' : state.plan ? '按已保存的工作日计划比较' : '按自然重置和日历计算';
+  $('target-detail').textContent = w.overdue ? '计划时间已过，请调整预算或在 Codex 中处理' : state.plan && w.bucket==='codex' && w.duration===604800000 ? '按已保存的工作日计划比较' : '按自然重置和日历计算';
   $('gap').textContent = w.gap == null ? '—' : `${w.gap >= 0 ? '+' : ''}${w.gap.toFixed(2)}`;
   $('gap-detail').textContent = w.gap == null ? '等待有效重置时间' : `百分点 · ${w.gap >= 0 ? '比目标充裕' : '消耗快于目标'}`;
   $('speed').textContent = w.requiredPerDay == null ? '—' : w.requiredPerDay.toFixed(2);
@@ -65,8 +65,7 @@ function render(next) {
   }
   if (!w.schedule.length) $('credits').textContent = w.duration !== 604800000 || w.bucket !== 'codex' ? '重置卡策略应用于 Codex 主额度的周窗口；其他池按自然重置展示。' : state.latest.creditsKnown ? '无待安排的有效到期卡片（无期限卡不强制安排）。' : '服务端未提供卡片明细，可手动填写到期时间。';
   else if (!state.config.manualCredits.length && state.latest.availableCount > state.latest.credits.length) $('credits').append(document.createTextNode('卡片清单不完整，当前计划只包含已知到期时间。'));
-  const f = w.forecast;
-  $('forecast').textContent = !f || state.stale ? '消耗趋势：需要至少 5 分钟的连续有效样本；断采或重置后重新积累。' : `近 ${((f.until-f.since)/3600000).toFixed(2)} 小时平均消耗 ${f.perDay.toFixed(2)} 百分点/有效工作日；预计自然重置时剩余 ${pct(f.atReset)}。${f.exhaustsAt ? '线性耗尽时间 ' + date(f.exhaustsAt) : '样本期间未观测到额度下降'}。此推算不能保证未来用量。`;
+  $('forecast').textContent = forecastDescription(state,w,date);
   if(activePane==='plan')renderPlan();
   if(activePane==='history')renderHistory();
   const core=state.windows.find(w=>w.bucket==='codex'&&w.duration===7*86400000);if(window.chrome?.webview)window.chrome.webview.postMessage({remaining:core?.remaining??null,gap:core?.gap??null,plannedPerWorkday:core?.plannedPerWorkday??null,reminder:state.reminder,stale:state.stale||core?.remaining==null,error:state.validationWarning||state.error||(state.stale?'数据已过期':'')});
@@ -118,7 +117,7 @@ $('chart').addEventListener('mousemove',event=>{const x=event.offsetX;const row=
 $('window').addEventListener('change',()=>{selected=$('window').value;render(state);});
 const stateReader=createLatestRead({read:signal=>api('state',undefined,{signal}),onData:render,onError:showConnectionError});
 function update(replace=false){if(mutationBusy)return;return stateReader.load({replace});}
-function showConnectionError(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';$('retry-connection').hidden=false;if(state){state.stale=true;renderOverview(state.windows.find(w=>w.key===selected));drawGauge();$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}
+function showConnectionError(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';$('retry-connection').hidden=false;if(state){state.stale=true;const w=state.windows.find(w=>w.key===selected);renderOverview(w);drawGauge();draw();$('forecast').textContent=forecastDescription(state,w,date);$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}
 async function changeState(button,route,value,after=()=>{}){
  if(mutationBusy)return;
  mutationBusy=true;stateReader.cancel();
@@ -185,21 +184,20 @@ function addHourRow(range) {
 }
 function syncLimits(){$('add-hours').disabled=$('hours-list').children.length>=8;$('add-ssh').disabled=$('ssh-list').children.length>=8;}
 function renderOverview(w) {
- const model=overview(state,w), {today,next}=model;
+ const model=overview(state,w), {today,next,cardAdvice}=model;
  $('today-date').textContent='今天 '+new Intl.DateTimeFormat('zh-CN',{timeZone:state.config.calendarTimezone,month:'long',day:'numeric',weekday:'short'}).format(state.now);
- $('today-title').textContent=model.stale?model.title:(state.advice?.title||model.title);
+ $('today-title').textContent=model.title;
  $('today-budget').textContent=today?'今日计划预算：'+formatAmount(today.amount)+' 个百分点':'每日计划以主额度周窗口为准';
- $('today-advice').textContent=model.stale?model.advice:(state.advice?.detail||model.advice);
- $('advice-actions').hidden=!state.advice?.alertKey;
- $('next-label').textContent='下一次复核'; $('next-budget').textContent=state.advice?.reviewAt?date(state.advice.reviewAt,true):'按需查看';
- $('next-date').textContent='容量预算是参考，不必为了用满而增加工作';
+ $('today-advice').textContent=model.advice;
+ $('advice-actions').hidden=!cardAdvice?.alertKey;
+ $('next-label').textContent=model.supported?'下一次复核':'当前窗口'; $('next-budget').textContent=cardAdvice?.reviewAt?date(cardAdvice.reviewAt,true):model.supported?'按需查看':'按自然重置使用';
+ $('next-date').textContent=model.supported?'容量预算是参考，不必为了用满而增加工作':'重置卡建议仅适用于 Codex 主额度周窗口';
  $('reset-short').textContent=w?.resetsAt?'自然重置 '+date(w.resetsAt,true):'重置时间未知';
  const events=[];
  events.push({title:'今天 '+model.todayKey.slice(5),label:today?.reason||'今日',detail:today?'计划 '+formatAmount(today.amount)+' 个百分点':'计划待确认'});
  if(next)events.push({title:next.date.slice(5),label:next.reason,detail:'计划 '+formatAmount(next.amount)+' 个百分点'});
  if(w?.resetsAt)events.push({title:date(w.resetsAt,true).split(' ')[0],label:'自然重置',detail:date(w.resetsAt,true).split(' ').slice(1).join(' ')});
- const advice=state.advice;
- events.push(advice?.card?{title:date(advice.card.expiresAt,true).split(' ')[0],label:'卡片到期',detail:date(advice.card.expiresAt,true).split(' ').slice(1).join(' ')+' · 可选择不用'}:{title:'重置卡',label:state.latest?.creditsKnown?'暂无到期安排':'状态待确认',detail:'以服务端核验为准'});
+ if(model.supported)events.push(cardAdvice?.card?{title:date(cardAdvice.card.expiresAt,true).split(' ')[0],label:'卡片到期',detail:date(cardAdvice.card.expiresAt,true).split(' ').slice(1).join(' ')+' · 可选择不用'}:{title:'重置卡',label:model.stale||!state.latest?.creditsKnown?'状态待确认':'暂无到期安排',detail:'以服务端核验为准'});
  $('timeline').replaceChildren(...events.slice(0,4).map(e=>{const li=document.createElement('li');for(const [tag,text]of [['strong',e.title],['span',e.label],['small',e.detail]]){const el=document.createElement(tag);el.textContent=text;li.append(el);}return li;}));
  drawGauge();
 }
@@ -240,11 +238,11 @@ function renderSpeed(data,explicit=false){
  }
  choice.value=speedSelection;
  const s=data.selected,last=s?.last;
- const unavailable=s?.source?.connected===false;
- $('speed-status').textContent=unavailable?'主机连接中断 · 下方为旧读数':s?({generating:'生成中 · 下方为上次完成响应',tool:'工具执行中 · 下方为上次响应',unmeasurable:'本次不可测 · 下方为上次有效响应',idle:'空闲 · 上次响应',completed:'最近完成响应',unknown:'等待可测响应'}[s.status]||'上次响应'):'尚无可测样本';
+ const health=speedOverview(data,Date.now(),speedConnected),unavailable=health.unavailable;
+ $('speed-status').textContent=unavailable?(last?'主机连接中断 · 下方为旧读数':'日志来源暂不可用'):s?({generating:'生成中 · 下方为上次完成响应',tool:'工具执行中 · 下方为上次响应',waiting:'活动状态待确认 · 等待日志更新',unmeasurable:'本次不可测 · 下方为上次有效响应',idle:'空闲 · 上次响应',completed:'最近完成响应',unknown:'等待可测响应'}[s.status]||'上次响应'):'尚无可测样本';
  $('speed-value').textContent=last?last.tps.toFixed(1):'—';$('speed-median').textContent=s?.median!=null?s.median.toFixed(1):'—';$('speed-count').textContent=s?`${s.count} 个有效样本 · 同模型与推理强度`:'尚无有效样本';
  $('speed-meta').textContent=s?`${s.source?.label||'本机'} · ${last?.model||s.model||'未知模型'} · ${last?.effort||s.effort||'强度未知'} · ${s.agent?'子代理':'会话'} ${s.session}${last?' · 样本 '+date(last.at):''}${s.old?' · 久未更新':''}`:'未跟随 Codex 当前选中任务；按已连接主机的最近活动选择';
- $('speed-reason').textContent=data.missingSelection?'所选会话暂不在覆盖范围':s?.source?.error||s?.reason||'';
+ $('speed-reason').textContent=data.missingSelection?'所选会话暂不在覆盖范围':health.reason||s?.reason||'';
  $('speed-detail').textContent=last?`输出 ${last.output} token / ${last.seconds.toFixed(2)} 秒；推理 ${last.reasoning??'未知'}，可见 ${last.visible??'未知'}。推理吞吐 ${last.reasoning==null?'未知':(last.reasoning/last.seconds).toFixed(1)}，可见吞吐 ${last.visible==null?'未知':(last.visible/last.seconds).toFixed(1)} token/s。最近同组样本总输出/总时长 ${s.weighted.toFixed(1)} token/s。`:'没有足够的计数与时间信息。';
  $('speed-coverage').textContent=data.coverage||'仅已配置的日志来源，不是全账户统计';
 }

@@ -84,5 +84,7 @@ test('missing window fields cannot erase the last valid verification baseline',(
 test('missing windows do not cancel an outstanding confirmation',()=>{
  const s=base(),held=guardSnapshot(read(s,60000,{remaining:100}),stored(s));
  const missing=guardSnapshot({...read(s,120000),windows:[]},held.state);
- assert.equal(missing.accepted,false);assert.deepEqual(missing.state.pending,held.state.pending);
+ assert.equal(missing.accepted,false);assert.equal(Object.values(missing.state.pending)[0].missing,true);assert.equal(Object.values(missing.state.pending)[0].firstAt,Object.values(held.state.pending)[0].firstAt);
+ assert.match(missing.warning,/未返回完整读数/);
+ assert.equal(guardSnapshot(read(s,150000,{remaining:100}),missing.state).accepted,true);
 });
