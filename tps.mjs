@@ -7,6 +7,8 @@ import os from 'node:os';
 const number=n=>Number.isSafeInteger(n)&&n>=0;
 const generated=p=>p.type==='reasoning'||p.type==='message'&&p.role==='assistant'||['function_call','custom_tool_call'].includes(p.type);
 const input=p=>['function_call_output','custom_tool_call_output','agent_message'].includes(p.type)||p.type==='message'&&['user','developer','system'].includes(p.role);
+const directoryFailure=error=>['ENOENT','ENOTDIR'].includes(error.code)?'本机会话日志目录不存在，请检查 Codex 数据目录或先运行一次本机任务':
+ ['EACCES','EPERM'].includes(error.code)?'本机会话日志目录无读取权限，请检查目录权限':'本机会话日志目录暂不可读，将自动重试';
 export class ResponseMeter {
  constructor(){this.samples=[];this.seen=new Set();this.pendingCalls=new Set();this.state='unknown';this.reason='尚无可测响应';this.model=null;this.effort=null;this.session=null;this.parent=null;this.start=null;this.end=null;this.turn=null;this.endedTurn=null;this.total=null;this.lastAt=0;this.activityAt=0;this.usageRecord=false;this.started=false;this.invalid=false;}
  resetWindow(at=null){this.start=at;this.end=null;this.invalid=false;}
@@ -70,12 +72,16 @@ export class ResponseMeter {
   const last=this.samples.at(-1)||null;
   const matching=last?this.samples.filter(x=>x.model===last.model&&x.effort===last.effort).slice(-7):[];
   const sorted=matching.map(s=>s.tps).sort((a,b)=>a-b),n=sorted.length;
-  return {session:this.session,parent:this.parent,agent:!!this.agent,model:this.model,effort:this.effort,status:now-this.activityAt>120000?'idle':this.state,reason:this.reason,last,old:last?now-last.at>300000:true,median:n?(sorted[Math.floor((n-1)/2)]+sorted[Math.floor(n/2)])/2:null,weighted:n?matching.reduce((a,s)=>a+s.output,0)/matching.reduce((a,s)=>a+s.seconds,0):null,count:n,recent:matching.map(s=>({at:s.at,tps:s.tps})),lastAt:this.activityAt};
+  const quiet=now-this.activityAt>120000;
+  const waiting=quiet&&this.started&&['generating','tool','completed'].includes(this.state);
+  const status=waiting?'waiting':quiet&&this.state==='completed'?'idle':this.state;
+  return {session:this.session,parent:this.parent,agent:!!this.agent,model:this.model,effort:this.effort,status,reason:waiting?'超过2分钟未收到新的活动记录，任务是否仍在运行待确认。':this.reason,last,old:last?now-last.at>300000:true,median:n?(sorted[Math.floor((n-1)/2)]+sorted[Math.floor(n/2)])/2:null,weighted:n?matching.reduce((a,s)=>a+s.output,0)/matching.reduce((a,s)=>a+s.seconds,0):null,count:n,recent:matching.map(s=>({at:s.at,tps:s.tps})),lastAt:this.activityAt};
  }
 }
 export class LocalSpeedReader {
- constructor({home=process.env.CODEX_HOME||path.join(os.homedir(),'.codex'),now=()=>Date.now(),maxFiles=24,maxEntries=20000,watchFactory=watch}={}){
+ constructor({home=process.env.CODEX_HOME||path.join(os.homedir(),'.codex'),now=()=>Date.now(),maxFiles=24,maxEntries=20000,watchFactory=watch,openDirectory=opendir}={}){
   this.home=home;this.now=now;this.maxFiles=maxFiles;this.maxEntries=maxEntries;this.files=new Map();this.catalog=new Map();this.discoveredAt=null;this.scan=null;this.warning=null;this.changed=new Set();this.watcher=null;this.watchFactory=watchFactory;this.closed=false;this.truncated=false;this.checkedAt=null;
+  this.openDirectory=openDirectory;this.error=null;this.discoveryError=null;
  }
  startWatching(){
   if(this.watcher||!this.watchFactory||this.closed)return;
@@ -91,23 +97,29 @@ export class LocalSpeedReader {
  close(){this.closed=true;this.watcher?.close();this.watcher=null;}
  async discover(){
   this.startWatching();
-  const now=this.now(),full=this.discoveredAt===null||now-this.discoveredAt>=60000;
+  const now=this.now(),full=this.discoveredAt===null||now-this.discoveredAt>=(this.discoveryError?5000:60000);
   if(full){
-   this.discoveredAt=now;const found=new Map();let count=0;this.truncated=false;
+   this.discoveredAt=now;const found=new Map();let count=0,directoryError=null;this.truncated=false;
    // Discover by file activity across creation dates. Only metadata is scanned;
    // conversation contents are read from bounded tails of the selected files.
    const walk=async(dir,depth)=>{
-    let entries;try{entries=await opendir(dir);}catch{return;}
-    for await(const entry of entries){
-     if(++count>this.maxEntries){this.truncated=true;break;}
-     const file=path.join(dir,entry.name);
-     if(entry.isDirectory()&&depth<3&&/^\d{2,4}$/.test(entry.name))await walk(file,depth+1);
-     else if(entry.isFile()&&entry.name.endsWith('.jsonl')){const info=await stat(file).catch(()=>null);if(info)found.set(file,{mtimeMs:info.mtimeMs});}
-     if(this.truncated)break;
-    }
+    try{
+     const entries=await this.openDirectory(dir);
+     for await(const entry of entries){
+      if(++count>this.maxEntries){this.truncated=true;break;}
+      const file=path.join(dir,entry.name);
+      if(entry.isDirectory()&&depth<3&&/^\d{2,4}$/.test(entry.name))await walk(file,depth+1);
+      else if(entry.isFile()&&entry.name.endsWith('.jsonl')){const info=await stat(file).catch(()=>null);if(info)found.set(file,{mtimeMs:info.mtimeMs});}
+      if(this.truncated)break;
+     }
+    }catch(error){directoryError??=directoryFailure(error);}
    };
-   await walk(path.join(this.home,'sessions'),0);this.catalog=found;
+   await walk(path.join(this.home,'sessions'),0);this.discoveryError=directoryError;
+   if(!directoryError)this.catalog=found;
   }
+  // A failed discovery must not turn previously measured responses into an empty,
+  // healthy source. Keep them available as explicitly disconnected old readings.
+  if(this.discoveryError){this.warning=this.discoveryError;return false;}
   const changed=[...this.changed];this.changed.clear();
   for(const file of changed){const info=await stat(file).catch(()=>null);if(info?.isFile())this.catalog.set(file,{mtimeMs:info.mtimeMs});else this.catalog.delete(file);}
   // Refresh already-covered mtimes even without filesystem watch support.
@@ -119,10 +131,12 @@ export class LocalSpeedReader {
   for(const file of this.files.keys())if(!keep.has(file))this.files.delete(file);
   for(const [file]of selected)if(!this.files.has(file))this.files.set(file,{offset:0,tail:Buffer.alloc(0),skip:false,identity:null,meter:new ResponseMeter()});
   this.warning=ranked.length?`本机来源按最近活动读取最多${this.maxFiles}个会话日志，包含旧会话续聊；不代表当前选中任务，归档不在覆盖范围。${this.truncated?'目录较多，发现范围尚不完整。':''}${!this.watcher?'文件监听不可用，新会话最长约60秒发现。':''}`:'未发现本机会话日志；不代表账户没有活动。';
+  return true;
  }
  async update(){if(this.scan)return this.scan;this.scan=this.read().finally(()=>this.scan=null);return this.scan;}
  async read(){
-  await this.discover();
+   if(!await this.discover()){this.error=this.discoveryError;return;}
+   this.error=null;
   for(const [file,state]of this.files){
    let handle;
    try{
@@ -140,7 +154,7 @@ export class LocalSpeedReader {
     let at;
     while((at=state.tail.indexOf(10))>=0){const line=state.tail.subarray(0,at);state.tail=state.tail.subarray(at+1);if(state.skip){state.skip=false;continue;}try{state.meter.feed(JSON.parse(line.toString('utf8')));}catch{state.meter.reject('日志包含无法解析的记录');}}
     if(state.tail.length>1024*1024){state.tail=Buffer.alloc(0);state.skip=true;state.meter.reject('单条记录过大，已跳过');}
-   }catch{state.meter.reject('日志暂不可读');}finally{await handle?.close();}
+   }catch{state.meter.reject('日志暂不可读');this.error='本机会话日志暂不可读，请检查文件权限；将自动重试';}finally{await handle?.close();}
   }
   this.checkedAt=this.now();
  }
@@ -150,6 +164,6 @@ export class LocalSpeedReader {
   sessions.sort((a,b)=>b.lastAt-a.lastAt);
   const seen=new Set(),unique=sessions.filter(s=>{if(seen.has(s.session))return false;seen.add(s.session);return true;});
   const chosen=selected?unique.find(s=>s.session===selected):unique.find(s=>!s.agent)||unique[0];
-  return {checkedAt:this.checkedAt,coverage:this.warning,selected:chosen||null,sessions:unique.map(({session,parent,agent,model,effort,lastAt})=>({session,parent,agent,model,effort,lastAt})),missingSelection:!!selected&&!chosen};
+  return {checkedAt:this.checkedAt,error:this.error,coverage:this.warning,selected:chosen||null,sessions:unique.map(({session,parent,agent,model,effort,lastAt})=>({session,parent,agent,model,effort,lastAt})),missingSelection:!!selected&&!chosen};
  }
 }

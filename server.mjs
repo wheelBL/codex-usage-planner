@@ -1,7 +1,7 @@
 import {advise,reminder} from './advice.mjs';
 import {SpeedReader} from './ssh-speed.mjs';
 import http from 'node:http';
-import {guardSnapshot} from './snapshot-guard.mjs';
+import {guardSnapshot,pendingWarning} from './snapshot-guard.mjs';
 import {createPollScheduler} from './polling.mjs';
 import {createSerialQueue} from './serial.mjs';
 import {describeFailure,failureLabel} from './diagnostics.mjs';
@@ -51,7 +51,7 @@ const guardFile=path.join(dataDir,'snapshot-guard.json');
 let guardState={version:1,trusted:latest,pending:{}},validationWarning=null;
 try {const saved=JSON.parse(await readFile(guardFile,'utf8'));if(saved.version===1&&saved.trusted?.account&&Array.isArray(saved.trusted.windows))guardState=saved;}catch{}
 if(guardState.trusted?.at> (latest?.at||0))latest=guardState.trusted;
-if(Object.keys(guardState.pending||{}).length)validationWarning='额度变化仍待核验，保留上次可信读数。';
+validationWarning=pendingWarning(guardState,Date.now());
 const planFile=path.join(dataDir,'plan.json');let plan=null,planKey=null;
 try{const saved=JSON.parse(await readFile(planFile,'utf8'));if(saved.plan?.version===5){plan=saved.plan;planKey=saved.key;}}catch{}
 async function updatePlan(snapshot,force=false){
@@ -119,9 +119,10 @@ const poller=createPollScheduler(refresh,()=>error);
 function schedulePoll(){poller.schedule();}
 function state(days = 7) {
   const now = Date.now();
+  const currentValidationWarning=pendingWarning(guardState,now)||validationWarning;
   const rows = latest ? history.filter(s => s.account === latest.account) : [];
-  const result = { demo, now, config, latest, plan: days>0?plan:null, error, validationWarning, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
-    stale: !latest || !!error || !!validationWarning || now - latest.at > 150000,
+  const result = { demo, now, config, latest, plan: days>0?plan:null, error, validationWarning:currentValidationWarning, persistenceError, refreshing: !!active,nextPollAt:poller.nextAt,
+    stale: !latest || !!error || !!currentValidationWarning || now - latest.at > 150000,
     windows: latest?.windows.map(w => ({ ...budget(w, latest, config, now, plan), forecast: forecast(rows, w, latest.account, now, config) })) || [],
     history: days > 0 ? rows.filter(s => s.at >= now - days * DAY) : [] };
   result.advice=advise(result);

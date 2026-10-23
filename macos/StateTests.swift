@@ -31,6 +31,7 @@ import Foundation
         }
         check(try speed().label(now: 100000) == "23.5 TPS", "recent response appears in menu bar")
         check(try speed("idle").label(now: 100000) == "23.5 TPS·闲", "idle sample is marked")
+        check(try speed("waiting").label(now: 100000) == "23.5 TPS·待确认", "quiet unfinished task is not reported as idle")
         check(try speed(checkedAt: 500000).label(now: 500000) == "23.5 TPS·旧", "old sample is marked")
         check(try speed().label(now: 100000, connected: false) == "— TPS", "disconnected speed is not current")
         check(try speed().label(now: 111000) == "— TPS", "stale collector is not current")

@@ -56,3 +56,18 @@ test('mid-turn tail recovers only after a complete response boundary and never a
  m.feed(row(12,'response_item',{type:'message',role:'assistant'}));m.feed(withTurn(12,'two',200));assert.equal(m.samples[0].tps,50);assert.equal(m.samples[0].model,null);
  m.feed(row(13,'event_msg',{type:'turn_aborted',turn_id:'continued'}));m.feed(row(15,'response_item',{type:'message',role:'assistant'}));m.feed(withTurn(15,'three',300));assert.equal(m.samples.length,1);
 });
+
+ test('quiet unfinished tasks are uncertain until a completion event',()=>{
+ const m=setup();assert.equal(m.view(base+130000).status,'waiting');
+ m.feed(row(131,'response_item',{type:'message',role:'assistant'}));assert.equal(m.view(base+131000).status,'generating');
+ m.feed(row(132,'event_msg',{type:'task_complete'}));assert.equal(m.view(base+133000).status,'idle');
+ });
+ test('missing log directories report failure and recover automatically',async()=>{
+ const home=await mkdtemp(path.join(os.tmpdir(),'tps-missing-'));let now=base;
+ const reader=new LocalSpeedReader({home,now:()=>now,watchFactory:null});
+ try{
+ await reader.update();assert.match(reader.snapshot().error,/目录不存在/);assert.equal(reader.checkedAt,null);
+ await mkdir(path.join(home,'sessions'));now+=6000;await reader.update();
+ assert.equal(reader.snapshot().error,null);assert.equal(reader.checkedAt,now);
+ }finally{reader.close();await rm(home,{recursive:true,force:true});}
+ });

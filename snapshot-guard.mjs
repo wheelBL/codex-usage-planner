@@ -36,6 +36,18 @@ function agrees(a, b) {
   return Math.abs(a.resetsAt - b.resetsAt) <= RESET_TOLERANCE_MS && b.remaining <= a.remaining + 1;
 }
 
+export function pendingWarning(saved, now) {
+  const pending=Object.values(saved.pending||{}).filter(p=>!p.confirmed);
+  if(!pending.length)return null;
+  const describe=p=>{
+    const seconds=Math.max(0,Math.floor((now-p.firstAt)/1000));
+    const waited=seconds<60?`${seconds}秒`:`${Math.floor(seconds/60)}分钟`;
+    const window=`${p.window.bucket} · ${p.window.duration/3600000}小时窗口`;
+    return `${window}${p.missing?'未返回完整读数':'等待一致读数'}，已等待${waited}`;
+  };
+  return pending.map(describe).join('；')+'。'+(pending.some(p=>p.missing)?'缺失读数恢复后才能继续核验，请检查额度来源；':'需要至少间隔30秒的第二次一致读数；')+'暂保留上次可信额度和计划。';
+}
+
 export function guardSnapshot(incoming, saved = {}) {
   const previous = saved.trusted?.account === incoming.account ? saved.trusted : null;
   if(previous && incoming.at <= previous.at)return {accepted:false,warning:'收到过时采样，保留上次可信额度。',state:saved};
@@ -47,7 +59,8 @@ export function guardSnapshot(incoming, saved = {}) {
     const key = identity(window);
     const old = reference.find(w => identity(w) === key);
     if (!suspicious(old, window, incoming.at)) continue;
-    const prior = priorPending[key];
+    const prior = priorPending[key] ? {...priorPending[key]} : null;
+    if(prior)delete prior.missing;
     const elapsed = prior ? incoming.at - prior.firstAt : -1;
     if (prior && elapsed >= MIN_CONFIRM_MS && elapsed <= MAX_CONFIRM_MS && agrees(prior.window, window)) {
       pending[key] = {...prior, confirmed:true};continue;
@@ -56,11 +69,11 @@ export function guardSnapshot(incoming, saved = {}) {
       ? prior : {firstAt: incoming.at, window};
   }
   for(const [key,value] of Object.entries(priorPending)) {
-    if(!snapshot.windows.some(w=>identity(w)===key && valid(w)))pending[key]=value;
+    if(!snapshot.windows.some(w=>identity(w)===key && valid(w)))pending[key]={...value,missing:true};
   }
   if (Object.values(pending).some(p => !p.confirmed)) {
-    return {accepted: false, warning: '检测到异常额度回升或重置时间变化，等待至少间隔30秒的第二次一致读数；暂保留上次可信额度和计划。',
-      state: {version: 1, trusted: previous, reference, pending}};
+    const state={version: 1, trusted: previous, reference, pending};
+    return {accepted: false, warning: pendingWarning(state,incoming.at),state};
   }
   const nextReference=new Map(reference.map(w=>[identity(w),w]));
   for(const w of snapshot.windows)if(valid(w))nextReference.set(identity(w),w);
