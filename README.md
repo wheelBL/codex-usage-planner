@@ -1,6 +1,6 @@
 # Codex Usage Planner · 用量节奏
 
-Windows 托盘 / macOS 菜单栏中的 Codex 用量监视器：查看实际余量、按需用卡建议、每日容量预算，以及最近会话的有效响应 TPS。
+Windows 托盘 / macOS 菜单栏中的 Codex 用量监视器：查看实际余量、Credits 余额、按需用卡建议、每日容量预算，以及最近会话的有效响应 TPS。
 
 ![每日计划演示](docs/plan-demo.png)
 
@@ -107,6 +107,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-Windows.ps1
 ~~~
 
 Node.js 若不在默认安装目录，可设置 PLANNER_NODE 为 node.exe 的完整路径。RPC 回退程序可通过 CODEX_COMMAND 指定，例如 JSON 数组中的 Codex 可执行文件路径。
+
+## Credits 余额
+
+首页底部常显账户的剩余 Credits，随用量自动更新；点击可查看保留服务端精度的余额和更新时间。首页最多显示两位小数，小于 0.01 的正数显示 `<0.01 Credits`。macOS 菜单栏悬停也可查看余额。
+
+OAuth 与 Codex app-server 两种来源均支持；余额与订阅额度百分比、重置卡数量分别统计，不换算为货币、token 或任务数，也不参与每日预算或用卡建议。仅展示主 Codex 额度池的余额，不借用其他池或其他账户的数值。没有订阅额度窗口但服务端返回余额时，仍可查看余额。
+
+明确返回的零余额显示 `0 Credits`；缺少具体数额显示未知，有余额但未提供数额时显示“有余额”，无限额度按服务端标记显示“不限量”。读取失败、数据过期或额度待核验时，已有余额标记为旧读数；切换账户后不沿用之前的余额。
 
 ## SSH 会话速度
 

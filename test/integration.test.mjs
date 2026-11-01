@@ -9,9 +9,10 @@ import { readUsage } from '../reader.mjs';
 const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 test('RPC handshake, usage parsing and bounded timeout',async()=>{
- const code="const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',s=>{const m=JSON.parse(s);if(m.id)console.log(JSON.stringify({id:m.id,result:m.method==='initialize'?{}:{accountId:'test-account',rateLimits:{primary:{usedPercent:20,windowDurationMins:10080,resetsAt:2000000000}},rateLimitResetCredits:{availableCount:0,credits:[]}}}));});";
+ const code="const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',s=>{const m=JSON.parse(s);if(m.id)console.log(JSON.stringify({id:m.id,result:m.method==='initialize'?{}:{accountId:'test-account',rateLimits:{credits:{balance:'1234.5678',hasCredits:true,unlimited:false},primary:{usedPercent:20,windowDurationMins:10080,resetsAt:2000000000}},rateLimitResetCredits:{availableCount:0,credits:[]}}}));});";
  const s=await readUsage({command:[process.execPath,'-e',code,'--']});
  assert.equal(s.windows[0].remaining,80);assert.equal(s.availableCount,0);
+ assert.equal(s.creditBalance.balance,'1234.5678');
  await assert.rejects(readUsage({command:[process.execPath,'-e','setInterval(()=>{},1000)','--'],timeout:150}),/超时/);
 });
 test('HTTP protections, exact settings and durable history',async()=>{
@@ -30,6 +31,7 @@ test('HTTP protections, exact settings and durable history',async()=>{
    assert.equal(state.config.remindersEnabled,false);
    assert.equal(state.reminder,null);
    assert.equal(state.advice.kind,'demo');
+   assert.equal(state.latest.creditBalance.balance,'1234.5678');
    assert.equal((await fetch(origin+'/api/speed')).status,403);
    const speed=await (await fetch(origin+'/api/speed',{headers})).json();assert.deepEqual(speed.sessions,[]);assert.equal(speed.selected,null);
    assert.equal((await fetch(origin+'/api/reminders',{method:'POST',headers,body:JSON.stringify({action:'dismiss'})})).status,409);
@@ -52,8 +54,10 @@ test('HTTP protections, exact settings and durable history',async()=>{
    const bad=await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({manualCredits:[{expiresAt:'2026-09-26'}]})});assert.equal(bad.status,400);
    const saved=await fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({timezone:'America/Los_Angeles',reserveDays:0})});assert.equal(saved.status,200);const afterSave=await saved.json();assert.equal(afterSave.plan.anchorAt,anchor,'display timezone preserves the baseline');
    const summary=await (await fetch(origin+'/api/summary',{headers})).json();assert.deepEqual(summary.history,[]);
+   assert.equal(summary.latest.creditBalance.balance,'1234.5678');
    assert.equal(JSON.parse(await readFile(path.join(dir,'settings.json'),'utf8')).timezone,'America/Los_Angeles');
    assert.ok((await readFile(path.join(dir,'history.jsonl'),'utf8')).includes('naturalTarget'));
+   assert.ok((await readFile(path.join(dir,'history.jsonl'),'utf8')).includes('"balance":"1234.5678"'));
    assert.equal((await fetch(origin+'/client.js')).status,200,'browser request module is served');
    const writes=await Promise.all(Array.from({length:8},(_,i)=>fetch(origin+'/api/settings',{method:'POST',headers,body:JSON.stringify({...afterSave.config,timezone:i%2?'UTC':'Asia/Tokyo'})}).then(async response=>({status:response.status,body:await response.json()}))));
    assert.ok(writes.every(r=>r.status===200),JSON.stringify(writes.map(r=>r.body.error)));

@@ -1,4 +1,4 @@
-import {formatAmount, dayKey, overview, forecastDescription, parseHourRows, parseDayOverrides, speedOverview} from './view-model.js';
+import {formatAmount, dayKey, overview, forecastDescription, parseHourRows, parseDayOverrides, speedOverview, creditBalanceView} from './view-model.js';
 import {createApiClient,createLatestRead} from './client.js';
 const $ = id => document.getElementById(id);
 const embedded=new URLSearchParams(location.search).has('embedded');
@@ -31,6 +31,16 @@ function populateSettings(config){
  $('overrides').value=Object.entries(config.dayOverrides).map(([d,w])=>d+'='+w).join('\n');
  $('manual').value=config.manualCredits.map(c=>c.expiresAt).join('\n');renderSSH(config.speedSources||[]);initialized=true;$('save-settings').disabled=false;
 }
+function renderBalance(data) {
+  const balance = creditBalanceView(data);
+  $('balance-value').textContent = balance.value;
+  $('balance-status').textContent = balance.caption;
+  $('balance-exact').textContent = balance.exact;
+  $('balance-detail').textContent = balance.status + (data.latest ? ` · ${date(data.latest.at,true)} 更新` : '');
+  $('show-balance').classList.toggle('stale', balance.stale);
+  $('show-balance').title = `${balance.exact} · ${balance.status}`;
+  $('show-balance').setAttribute('aria-label', `剩余 Credits 余额 ${balance.value}，${balance.status}，查看余额详情`);
+}
 function render(next) {
   state = next;
   const old = selected;
@@ -44,6 +54,7 @@ function render(next) {
     state.error ? state.error+(state.refreshing?' · 正在重试':state.nextPollAt?' · 下次检查 '+date(state.nextPollAt,true):'') : (state.stale ? '等待新数据；旧快照不可视为当前额度。' : '已连接 · 自动记录中'),
     state.validationWarning || '', state.latest?.ordinaryUsageAllowed === false ? '服务端当前不允许普通额度使用。' : '', state.latest?.creditsWarning || '', state.config.manualAccount && state.config.manualAccount !== state.latest?.account && state.config.manualCredits.length ? '手动卡片属于其他账户，已停用' : '', state.persistenceError || ''].filter(Boolean).join('  /  ');
   $('sample').textContent = state.latest ? `${date(state.latest.at,true)} 更新` : '尚未更新';
+  renderBalance(state);
   const w = state.windows.find(w => w.key === selected);
   renderOverview(w);
   if (!w) { for(const id of ['actual','target','gap','speed','credits-count','reset','deadline','natural'])$(id).textContent='—'; $('actual-detail').textContent='等待有效数据'; $('credits').replaceChildren(); renderPlan();if(activePane==='history')renderHistory();draw(); return; }
@@ -117,7 +128,7 @@ $('chart').addEventListener('mousemove',event=>{const x=event.offsetX;const row=
 $('window').addEventListener('change',()=>{selected=$('window').value;render(state);});
 const stateReader=createLatestRead({read:signal=>api('state',undefined,{signal}),onData:render,onError:showConnectionError});
 function update(replace=false){if(mutationBusy)return;return stateReader.load({replace});}
-function showConnectionError(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';$('retry-connection').hidden=false;if(state){state.stale=true;const w=state.windows.find(w=>w.key===selected);renderOverview(w);drawGauge();draw();$('forecast').textContent=forecastDescription(state,w,date);$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}
+function showConnectionError(e){$('status').textContent='状态服务不可达：'+e.message;$('status').className='warn';$('retry-connection').hidden=false;if(state){state.stale=true;renderBalance(state);const w=state.windows.find(w=>w.key===selected);renderOverview(w);drawGauge();draw();$('forecast').textContent=forecastDescription(state,w,date);$('actual-detail').textContent='上次已知值 · 服务不可达';}window.chrome?.webview?.postMessage({stale:true,error:'本机状态服务不可达'});}
 async function changeState(button,route,value,after=()=>{}){
  if(mutationBusy)return;
  mutationBusy=true;stateReader.cancel();
@@ -155,6 +166,7 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSpeed
 $('add-hours').addEventListener('click',()=>{if($('hours-list').children.length<8){addHourRow();markDirty();}});
 $('show-help').addEventListener('click',()=>{ $('help').open=true; $('help').scrollIntoView({block:'start'}); });
 $('show-credits').addEventListener('click',()=>{ $('usage-details').open=true; $('credits').scrollIntoView({block:'center'}); });
+$('show-balance').addEventListener('click',()=>{ $('balance-details').open=true; $('balance-details').scrollIntoView({block:'center'}); });
 loadSpeed();setInterval(()=>{if(!document.hidden){renderRecentSpeed();loadSpeed();}},1000);
 await update();setInterval(()=>{if(!document.hidden||embedded)update();},15000);
 

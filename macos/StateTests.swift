@@ -23,6 +23,21 @@ import Foundation
         let short = try state(",{\"key\":\"codex:primary\",\"bucket\":\"codex\",\"duration\":18000000,\"remaining\":80}")
         check(short.short?.remaining == 80, "select lanes by duration")
         check(short.tooltip.contains("5小时剩余 80.0%"), "short window in tooltip")
+        func balanceState(_ balance: String, stale: Bool = false) throws -> UsageState {
+            let json = """
+            {"demo":false,"stale":\(stale),"windows":[],"latest":{"at":100000,"creditBalance":\(balance)}}
+            """
+            return try JSONDecoder().decode(UsageState.self, from: Data(json.utf8))
+        }
+        check(try balanceState("{\"balance\":\"1234.56789\",\"hasCredits\":true,\"unlimited\":false}").tooltip.contains("1,234.57 Credits"), "balance appears even without subscription windows")
+        check(try balanceState("{\"balance\":\"0\",\"hasCredits\":false}").tooltip.contains("0 Credits"), "explicit zero balance is retained")
+        check(try balanceState("{\"balance\":null,\"hasCredits\":false}").tooltip.contains("余额 未知"), "missing balance is not zero")
+        check(try balanceState("{\"unlimited\":true}").tooltip.contains("不限量"), "unlimited balance has no invented amount")
+        check(try balanceState("{\"balance\":\"0.000001\"}").tooltip.contains("<0.01 Credits"), "small positive balance is not rounded to zero")
+        check(try balanceState("{\"balance\":\"10\"}", stale: true).tooltip.contains("旧读数"), "old balance is labeled")
+        check(try balanceState("{\"balance\":\"12junk\"}").tooltip.contains("余额 未知"), "invalid balance text is rejected")
+        check(try balanceState("{\"balance\":\"10\",\"hasCredits\":false}").tooltip.contains("当前不可用"), "unavailable credit balance stays unavailable")
+        check(try balanceState("{\"balance\":\"0.000001\",\"hasCredits\":false}").tooltip.contains("当前不可用"), "small unavailable balance preserves its status")
         func speed(_ status: String = "generating", at: Double = 98000, checkedAt: Double = 100000, tps: Double = 23.5) throws -> SpeedSnapshot {
             let json = """
             {"checkedAt":\(checkedAt),"selected":{"session":"recent-session","model":"test","status":"\(status)","last":{"tps":\(tps),"at":\(at)}}}

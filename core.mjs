@@ -4,6 +4,15 @@ import { speedSources } from './speed-sources.mjs';
 export const DAY = 86400000;
 export const clamp = n => Math.max(0, Math.min(100, n));
 const finite = n => typeof n === 'number' && Number.isFinite(n);
+// Account Credits are independent of subscription percentages and reset cards.
+export function normalizeCreditBalance(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = typeof raw.balance === 'string' ? raw.balance.trim() : finite(raw.balance) && raw.balance >= 0 ? String(raw.balance) : '';
+  const balance = value.length <= 128 && /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value)) ? value : null;
+  const hasCredits = typeof raw.hasCredits === 'boolean' ? raw.hasCredits : null;
+  const unlimited = typeof raw.unlimited === 'boolean' ? raw.unlimited : null;
+  return balance === null && hasCredits === null && unlimited === null ? null : {balance, hasCredits, unlimited};
+}
 export function instant(value) {
   if (finite(value)) return value * 1000;
   // A date without an explicit offset is ambiguous and must never use the host zone.
@@ -28,7 +37,9 @@ export function normalize(result, account, now = Date.now()) {
     }
   }
   const summary = result.rateLimitResetCredits;
+  const mainBucket = buckets.codex ?? (!result.rateLimits?.limitId || result.rateLimits.limitId === 'codex' ? result.rateLimits : null);
   return { at: now, account, windows, ordinaryUsageAllowed: result.ordinaryUsageAllowed ?? null,
+    creditBalance: normalizeCreditBalance(mainBucket?.credits),
     availableCount: summary?.availableCount ?? null,
     creditsKnown: Array.isArray(summary?.credits),
     credits: (summary?.credits || []).map(c => ({ id: c.id, status: c.status, resetType: c.resetType,

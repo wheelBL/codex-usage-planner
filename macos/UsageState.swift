@@ -53,7 +53,26 @@ struct UsageWindow: Decodable {
     }
 }
 struct UsageState: Decodable {
-    struct Sample: Decodable { let at: Double }
+    struct CreditBalance: Decodable {
+        let balance: String?
+        let hasCredits: Bool?
+        let unlimited: Bool?
+        var label: String {
+            if unlimited == true { return "不限量" }
+            guard let balance, balance.range(of: "^\\d+(?:\\.\\d+)?$", options: .regularExpression) != nil,
+                  let amount = Decimal(string: balance, locale: Locale(identifier: "en_US_POSIX")), amount >= 0 else {
+                return hasCredits == true ? "有余额（数额未知）" : "未知"
+            }
+            let availability = hasCredits == false && amount > 0 ? "（当前不可用）" : ""
+            if amount > 0 && amount < Decimal(string: "0.01")! { return "<0.01 Credits" + availability }
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 2
+            return (formatter.string(from: NSDecimalNumber(decimal: amount)) ?? balance) + " Credits" + availability
+        }
+    }
+    struct Sample: Decodable { let at: Double; let creditBalance: CreditBalance? }
     struct Reminder: Decodable { let id: String; let title: String; let body: String }
     let reminder: Reminder?
     let latest: Sample?
@@ -70,7 +89,8 @@ struct UsageState: Decodable {
         return (demo ? "演示 " : "") + "周 \(Int(weekly!.remaining!))%"
     }
     var tooltip: String {
-        if invalid { return "Codex · " + (validationWarning ?? error ?? "数据过期或周额度不可用，点击查看详情") }
+        let balance = "\nCredits 余额" + (stale && latest?.creditBalance != nil ? "（旧读数）" : "") + " " + (latest?.creditBalance?.label ?? "未知")
+        if invalid { return "Codex · " + (validationWarning ?? error ?? "数据过期或周额度不可用，点击查看详情") + balance }
         var text = String(format: "Codex · 周剩余 %.1f%%", weekly!.remaining!)
         if let value = short?.remaining { text += String(format: " · 5小时剩余 %.1f%%", value) }
         if let gap = weekly?.gap { text += String(format: "\n实际 − 计划 %+.1f 点", gap) }
@@ -78,6 +98,6 @@ struct UsageState: Decodable {
             text += "\n周重置 " + Date(timeIntervalSince1970: reset / 1000).formatted(date: .abbreviated, time: .shortened)
         }
         if let at = latest?.at { text += "\n更新于 " + Date(timeIntervalSince1970: at / 1000).formatted(date: .omitted, time: .standard) }
-        return text
+        return text + balance
     }
 }

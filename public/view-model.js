@@ -1,6 +1,22 @@
 // Shared, DOM-free presentation rules for both desktop hosts.
 const amountFormatter=new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 2});
 export const formatAmount = value => Number.isFinite(value) ? amountFormatter.format(value) : '—';
+export function creditBalanceView(state) {
+  const credits = state.latest?.creditBalance;
+  const text = credits?.balance;
+  const amount = typeof text === 'string' && /^\d+(?:\.\d+)?$/.test(text) && Number.isFinite(Number(text)) ? Number(text) : null;
+  const unlimited = credits?.unlimited === true;
+  const known = unlimited || amount !== null;
+  const stale = !!credits && (!!state.stale || !Number.isFinite(state.latest?.at) || state.now - state.latest.at > 150000 || state.latest.at > state.now + 5000);
+  const exact = amount === null ? credits?.hasCredits === true ? '有余额，具体数额未知' : '未知' : text.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1');
+  return {
+    value: unlimited ? '不限量' : amount !== null ? `${amount > 0 && amount < 0.01 ? '<0.01' : formatAmount(amount)} Credits` : credits?.hasCredits === true ? '有余额' : '— Credits',
+    caption: stale ? '剩余余额 · 旧读数' : unlimited ? '剩余余额 · 服务端标记无上限' : amount !== null ? credits?.hasCredits === false && amount > 0 ? '剩余余额 · 当前不可用' : '剩余余额 · 已更新' : '剩余余额 · 数额未知',
+    exact: unlimited ? '不限量（服务端标记）' : amount !== null ? `${exact} Credits` : exact,
+    status: stale ? '旧读数，等待账户数据更新' : known ? credits?.hasCredits === false && amount > 0 && !unlimited ? '服务端标记当前余额不可用' : '服务端账户读数' : '服务端尚未提供具体余额',
+    stale
+  };
+}
 export function dayKey(at, timezone) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(at).map(x => [x.type,x.value]));
   return `${p.year}-${p.month}-${p.day}`;

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { normalize } from './core.mjs';
+import { normalize, normalizeCreditBalance } from './core.mjs';
 import { readResetCredits } from './credits.mjs';
 import {getWithRetry} from './diagnostics.mjs';
 export async function readOAuthUsage({onDiagnostic=()=>{}}={}) {
@@ -16,9 +16,10 @@ export async function readOAuthUsage({onDiagnostic=()=>{}}={}) {
   if (raw.account_id && raw.account_id !== t.account_id) throw new Error('Account mismatch');
   const window = w => w == null ? null : ({ usedPercent:w.used_percent, windowDurationMins:typeof w.limit_window_seconds === 'number' ? w.limit_window_seconds/60 : null, resetsAt:w.reset_at });
   const bucket = (r,name) => ({ limitName:name, primary:window(r?.primary_window), secondary:window(r?.secondary_window) });
-  const rateLimitsByLimitId = { codex:bucket(raw.rate_limit,'codex') };
+  const creditBalance = raw.credits ? {balance:raw.credits.balance,hasCredits:raw.credits.has_credits,unlimited:raw.credits.unlimited} : null;
+  const rateLimitsByLimitId = { codex:{...bucket(raw.rate_limit,'codex'),credits:creditBalance} };
   for (const r of raw.additional_rate_limits || []) if (r.metered_feature) rateLimitsByLimitId[r.metered_feature] = bucket(r.rate_limit,r.limit_name);
-  if (!Object.values(rateLimitsByLimitId).some(b=>b.primary || b.secondary)) throw new Error('No usage windows');
+  if (!Object.values(rateLimitsByLimitId).some(b=>b.primary || b.secondary) && !normalizeCreditBalance(creditBalance)) throw new Error('No usage windows or credit balance');
   let credits = {availableCount:raw.rate_limit_reset_credits?.available_count ?? null}, creditsWarning=null;
   try { credits = await readResetCredits(t.account_id); } catch { creditsWarning='重置卡明细暂不可用，可手动填写到期时间。'; }
   const account = createHash('sha256').update(t.account_id).digest('hex').slice(0,20);

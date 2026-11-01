@@ -72,7 +72,7 @@ const previousDemoReset=latest?.account==='demo'?latest.windows.find(w=>w.bucket
 const demoStarted = previousDemoReset>Date.now()?previousDemoReset-2*DAY:Date.now();
 function demoSnapshot() {
   const now = Date.now();
-  return normalize({ accountId: 'demo', rateLimits: { primary: { usedPercent: 20, windowDurationMins: 10080, resetsAt: Math.floor((demoStarted + 2 * DAY) / 1000) } },
+  return normalize({ accountId: 'demo', rateLimits: { credits:{balance:'1234.5678',hasCredits:true,unlimited:false}, primary: { usedPercent: 20, windowDurationMins: 10080, resetsAt: Math.floor((demoStarted + 2 * DAY) / 1000) } },
     rateLimitResetCredits: { availableCount: 1, credits: [{ id: 'demo', status: 'available', resetType: 'codexRateLimits', expiresAt: Math.floor((demoStarted + 8 * DAY) / 1000) }] } }, 'demo', now);
 }
 async function recordDiagnostic(event){try{const file=path.join(dataDir,'reader-diagnostics.jsonl');if((await stat(file).catch(()=>({size:0}))).size>65536)await rename(file,file+'.previous');await appendFile(file,JSON.stringify({at:Date.now(),...event})+'\n',{mode:0o600});}catch{}}
